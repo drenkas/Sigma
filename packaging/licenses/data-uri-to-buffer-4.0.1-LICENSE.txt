@@ -1,0 +1,8 @@
+Package: data-uri-to-buffer@4.0.1
+License: MIT per package.json; no license file shipped in the npm tarball
+Text source: License section of the package README.md in the published 4.0.1 tarball (repo master has only README.md, no LICENSE file); HTML entities decoded
+Date: 2026-10-05
+Provenance details: .scratch/licenses-2026-10-05/REPORT.md
+----------------------------------------------------------------
+
+

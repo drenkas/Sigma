@@ -1,0 +1,16 @@
+(version 1)
+; QA browser outer sandbox. Placeholders are JSON-quoted strings substituted by qa-browser.ts.
+; Base is permissive (Chromium needs mach/IPC/sysctl access) and the dangerous capabilities are denied afterwards.
+(allow default)
+; Network: loopback to the preview port only.
+(deny network*)
+(allow network-outbound (remote ip "localhost:@PORT@"))
+; Files: the browser may read no user data, and write only into its own run directory.
+(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/folders"))
+(deny file-write*)
+(allow file-read-metadata)
+(allow file-read* (subpath @APP@) (subpath @RUN@))
+(allow file-write* (subpath @RUN@) (literal "/dev/null") (literal "/dev/dtracehelper"))
+; Chromium's ProcessSingleton ignores TMPDIR and binds a unix socket in the per-user temp dir.
+(allow network-bind (local unix-socket (regex #"^/private/var/folders/[^/]+/[^/]+/T/com\.google\.chrome\.for\.testing\.")))
+(allow file-read* file-write* (regex #"^/private/var/folders/[^/]+/[^/]+/T/com\.google\.chrome\.for\.testing\."))

@@ -1,0 +1,24 @@
+{
+  "$schema": "../../../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Sigma",
+  "version": "0.8.0",
+  "identifier": "dev.sigma.app",
+  "build": { "frontendDist": "../../../.scratch/desktop-runtime/dist/web" },
+  "app": {
+    "windows": [{ "label": "main", "title": "Sigma", "url": "http://127.0.0.1:4321", "create": false, "width": 1280, "height": 800 }],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'" }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVERUMxMkU0RjA2NEVDNjIKUldSaTdHVHc1QkxzN2Q1M0NXTVZsVXU3R1pPeTBmUmpuQmdzTURxQzh1b09NcGFnTEh0aXFsNTQK",
+      "endpoints": ["https://github.com/drenkas/Sigma/releases/latest/download/latest.json"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"],
+    "resources": { "../../../.scratch/desktop-runtime/": "sigma-runtime/" },
+    "macOS": { "minimumSystemVersion": "13.5" }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": ".",
+    "outDir": ".scratch/desktop-emit"
+  },
+  "files": ["apps/server/main.ts"],
+  "include": []
+}

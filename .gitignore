@@ -1,0 +1,16 @@
+node_modules/
+dist/
+target/
+.data/
+.scratch/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+apps/desktop/src-tauri/gen/
+work/*
+!work/*.mjs
+!work/make-icon.py
+release/

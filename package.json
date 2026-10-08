@@ -1,0 +1,40 @@
+{
+  "name": "sigma",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "version:bump": "node scripts/bump-version.mjs",
+    "dev:server": "SIGMA_DEV_ORIGIN=1 tsx watch apps/server/main.ts",
+    "dev:web": "vite --host 127.0.0.1 --port 4317",
+    "build": "tsc --noEmit && vite build",
+    "prestart": "npm run build",
+    "start": "node --import tsx apps/server/main.ts",
+    "desktop:emit": "tsc -p tsconfig.desktop.json",
+    "desktop:package": "npm run build && npm run desktop:emit && node scripts/package-desktop.mjs",
+    "desktop:build": "npm run desktop:package && node scripts/build-desktop.mjs",
+    "release:prepare": "node scripts/release-artifacts.mjs",
+    "desktop:dev": "npm run desktop:package && node_modules/.bin/tauri dev",
+    "check": "SIGMA_APPROVAL_MODE=ask node --import tsx --test --test-concurrency=1 apps/server/*.test.ts",
+    "check:parallel": "SIGMA_APPROVAL_MODE=ask node --import tsx --test apps/server/*.test.ts",
+    "bench": "node work/bench.mjs",
+    "migrate:preview": "node --import tsx apps/server/legacy-migrate-cli.ts preview",
+    "migrate:stage": "node --import tsx apps/server/legacy-migrate-cli.ts stage",
+    "migrate:status": "node --import tsx apps/server/legacy-migrate-cli.ts status"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@tauri-apps/api": "2.12.0",
+    "fastify": "5.12.5",
+    "solid-js": "1.9.15"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.0",
+    "@types/node": "24.10.4",
+    "typescript": "5.9.3",
+    "tsx": "4.20.6",
+    "vite": "7.3.6",
+    "vite-plugin-solid": "2.11.8"
+  }
+}
