@@ -291,7 +291,7 @@ The script keeps `package.json`, `package-lock.json`, `tauri.conf.json`, `Cargo.
 
 ### Updates
 
-Sigma updates itself from GitHub Releases (`drenkas/Sigma`) with the Tauri updater. About 10 seconds after launch, and then every ~6 hours, the app checks `https://github.com/drenkas/Sigma/releases/latest/download/latest.json`. If a newer version exists, an **Update to vX.Y.Z** button (with **Later**) appears in the sidebar; clicking it downloads the signed archive, verifies it against the public key in `tauri.conf.json`, replaces the app, stops the local service in order and relaunches. **Sigma → Check for Updates…** runs the check on demand and shows the same button (or an "up to date" dialog). The check is skipped in debug builds and when `SIGMA_DISABLE_UPDATER=1`.
+Sigma updates itself from GitHub Releases (`drenkas/Sigma`) with the Tauri updater. About 10 seconds after launch, and then every ~6 hours, the app checks `https://github.com/drenkas/Sigma/releases/latest/download/latest.json`. If a newer version exists, a small round download button (tooltip: **Update to vX.Y.Z and restart**) appears at the bottom of the sidebar; clicking it downloads the signed archive, verifies it against the public key in `tauri.conf.json`, replaces the app, stops the local service in order and relaunches. **Sigma → Check for Updates…** runs the check on demand and shows the same button (or an "up to date" dialog). The check is skipped in debug builds and when `SIGMA_DISABLE_UPDATER=1`.
 
 Cutting a release:
 

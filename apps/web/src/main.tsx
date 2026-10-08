@@ -12,7 +12,7 @@ import { Repository } from "./Repository.js";
 import { Roles } from "./Roles.js";
 import { Cleanup } from "./Cleanup.js";
 import { Providers } from "./Providers.js";
-import { UpdateBanner } from "./UpdateBanner.js";
+import { UpdateButton } from "./UpdateButton.js";
 import "./style.css";
 
 type Model = { provider:string; id:string; name:string; reasoningLevels?:string[]; legacy?:boolean };
@@ -608,7 +608,6 @@ function App(){
       <button class="nav-item" classList={{active:showRoles()}} onClick={()=>{setShowProviders(false);setShowProjects(false);setShowRoles(true);setDetailsOpen(false);setNavOpen(false);}}><Icon name="bot"/>Agents</button>
       <button class="nav-item" classList={{active:showProviders()}} onClick={()=>{setShowProjects(false);setShowRoles(false);setShowProviders(true);setDetailsOpen(false);setNavOpen(false);queueMicrotask(()=>document.getElementById("providers-title")?.focus());}}><Icon name="cpu"/>Providers</button>
     </div>
-    <UpdateBanner/>
     <nav class="session-list" aria-label="Projects and sessions" onKeyDown={listKeys}>
     <Show when={workspaceRecovery().length}><section class="setup-recovery" aria-label="Workspace setup recovery"><h2>Workspace setup recovery</h2><For each={workspaceRecovery()}>{item=><article class="setup-recovery-item"><div><strong>{item.kind}</strong><span class="mono">{item.id.slice(0,28)}</span></div><Show when={item.setup}><details><summary>Inspect workspace identity</summary><dl class="setup-identity"><dt>Phase</dt><dd>{item.setup!.phase} · {item.setup!.sessionId}</dd><dt>Source</dt><dd>{item.setup!.sourceCwd??item.setup!.cwd}</dd><dt>Workspace</dt><dd>{item.setup!.cwd} · {item.cwdExists?"present":"absent"} · {item.worktreeRegistered?"Git registered":"no worktree registration"} · {item.registered?"session row present":"session row absent"}</dd><dt>Git owner</dt><dd>{item.workspaceGitDir??"unavailable"} · expected {item.setup!.workspaceGitDir??item.setup!.gitDir??"read only"}</dd><dt>HEAD</dt><dd>{item.head??"unavailable"} · expected {item.setup!.baseCommit??"read only"}</dd><dt>Pi history</dt><dd>{item.managerFile??"absent; reserved ID"} · {item.setup!.managerId}</dd></dl></details></Show><Show when={!item.setup&&(item.cwd||item.managerFile)}><p class="mono">{item.cwd??item.managerFile}</p></Show><p>{item.reason??(item.canContinue?"Verified workspace is ready for explicit continuation.":"Inspect saved workspace and Pi history before continuing.")}</p><p>Continuing setup does not rerun the original input.</p><div><span class="tag">{item.status}</span><Show when={recoveryBusy()===item.id&&item.setup}><button class="btn danger-ghost sm" onClick={()=>void stopSetup(item)}>Stop setup</button></Show><Show when={item.canContinue&&["create","delegate","review_spawn"].includes(item.kind)}><button class="btn ghost sm" disabled={recoveryBusy()===item.id||offline()} onClick={()=>void continueWorkspaceSetup(item)}>{recoveryBusy()===item.id?"Continuing…":"Continue setup"}</button></Show></div></article>}</For></section></Show>
       <div class="side-section"><h2 ref={navTitle} class="section-label" tabindex="-1">Projects</h2><button class="icon-btn xs" onClick={()=>editProject()} aria-label="New project" title="New project"><Icon name="plus"/></button></div>
@@ -633,9 +632,12 @@ function App(){
         <button role="menuitem" class="danger" onClick={()=>{const pr=m().project;setMenu(null);void deleteProject(pr);}}>Delete</button>
       </div>}</Show>
     </nav>
-    <div class="side-foot" role="status" aria-live="polite">
+    <div class="side-foot">
+      <UpdateButton/>
+      <div class="side-status" role="status" aria-live="polite">
       <span class={`conn conn-${conn()}`} aria-hidden="true"/>
       <span><strong>{CONN[conn()].label}{conn()==="reconnecting"&&attempt()>1?` (attempt ${attempt()})`:""}</strong><small>{CONN[conn()].detail}</small></span>
+      </div>
     </div>
   </aside>;
 

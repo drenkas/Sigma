@@ -6,8 +6,8 @@ type Phase = "idle"|"installing"|"error";
 const inTauri=()=>typeof window!=="undefined"&&"__TAURI_INTERNALS__" in window;
 
 // Shown only inside the Tauri desktop shell. The API is imported lazily so the plain web build never loads it.
-export function UpdateBanner(){
-  const [info,setInfo]=createSignal<Info|null>(null),[phase,setPhase]=createSignal<Phase>("idle"),[error,setError]=createSignal(""),[progress,setProgress]=createSignal<{downloaded:number;total:number|null}|null>(null),[hidden,setHidden]=createSignal(false);
+export function UpdateButton(){
+  const [info,setInfo]=createSignal<Info|null>(null),[phase,setPhase]=createSignal<Phase>("idle"),[error,setError]=createSignal(""),[progress,setProgress]=createSignal<{downloaded:number;total:number|null}|null>(null);
   const unlisten:Array<()=>void>=[];
   let disposed=false;
   onMount(async()=>{
@@ -15,7 +15,7 @@ export function UpdateBanner(){
     try{
       const [{invoke},{listen}]=await Promise.all([import("@tauri-apps/api/core"),import("@tauri-apps/api/event")]);
       const keep=(off:()=>void)=>{if(disposed)off();else unlisten.push(off);};
-      keep(await listen<Info>("sigma-update-available",e=>{setInfo(e.payload);setHidden(false);}));
+      keep(await listen<Info>("sigma-update-available",e=>{setInfo(e.payload);}));
       keep(await listen<{downloaded:number;total:number|null}>("sigma-update-progress",e=>setProgress(e.payload)));
       keep(await listen<string>("sigma-update-error",e=>{setError(String(e.payload));setPhase("error");}));
       const current=await invoke<Info|null>("update_status");
@@ -31,16 +31,14 @@ export function UpdateBanner(){
     }catch(e){setError(String(e));setPhase("error");}
   }
   const percent=()=>{const p=progress();return p&&p.total?Math.min(100,Math.round(p.downloaded/p.total*100)):null;};
-  return <Show when={info()&&!hidden()}>
-    <section class="update-banner" role="status" aria-label="Update available">
-      <div class="update-text"><strong>Sigma {info()!.version} is available</strong><span>You have {info()!.current}.</span></div>
-      <Show when={phase()==="error"}><p class="update-error" role="alert">Update failed: {error()}</p></Show>
-      <div class="update-actions">
-        <button class="btn accent sm" disabled={phase()==="installing"} onClick={()=>void install()}>
-          {phase()==="installing"?(percent()!==null?`Installing… ${percent()}%`:"Installing…"):phase()==="error"?"Retry":`Update to v${info()!.version}`}
-        </button>
-        <Show when={phase()!=="installing"}><button class="btn ghost sm" onClick={()=>setHidden(true)}>Later</button></Show>
-      </div>
-    </section>
+  const label=()=>phase()==="error"?`Update failed: ${error()}. Click to retry`:phase()==="installing"?(percent()!==null?`Installing update… ${percent()}%`:"Installing update…"):`Update to v${info()!.version} and restart (you have ${info()!.current})`;
+  const R=12,C=2*Math.PI*R;
+  return <Show when={info()}>
+    <button type="button" class="update-btn" classList={{installing:phase()==="installing",failed:phase()==="error"}} disabled={phase()==="installing"} title={label()} aria-label={label()} onClick={()=>void install()}>
+      <Show when={phase()==="installing"} fallback={<svg class="update-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6 8.5l4 4 4-4M4 16h12"/></svg>}>
+        <svg class="update-ring" viewBox="0 0 28 28" aria-hidden="true"><circle class="ring-track" cx="14" cy="14" r={R}/><circle classList={{"ring-bar":true,spin:percent()===null}} cx="14" cy="14" r={R} stroke-dasharray={`${percent()===null?C*0.25:C*percent()!/100} ${C}`}/></svg>
+        <Show when={percent()!==null}><span class="update-pct" aria-hidden="true">{percent()}</span></Show>
+      </Show>
+    </button>
   </Show>;
 }
