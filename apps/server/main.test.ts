@@ -4,12 +4,15 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Storage } from "./storage.js";
 import { PiHost } from "./pi-host.js";
 import { registerDemoProvider } from "./demo-provider.js";
+import { chromiumPath } from "./qa-browser.js";
+import { syntheticChromeBinary } from "./chrome-test-fixture.js";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const root=resolve(import.meta.dirname,"../..");
@@ -18,9 +21,9 @@ process.env.PI_OFFLINE="1";
 process.env.PI_CODING_AGENT_DIR=join(testRoot,"agent");
 async function freePort():Promise<number>{const s=createServer();await new Promise<void>(r=>s.listen(0,"127.0.0.1",r));const port=(s.address() as {port:number}).port;await new Promise<void>(r=>s.close(()=>r()));return port;}
 async function waitFor(check:()=>Promise<boolean>,ms=6000){const until=Date.now()+ms;while(Date.now()<until){if(await check())return;await new Promise(r=>setTimeout(r,50));}throw new Error("Timed out waiting for state");}
-async function launch(port:number,dataDir:string,preload?:string):Promise<ChildProcess>{
+async function launch(port:number,dataDir:string,preload?:string,browser=chromiumPath()):Promise<ChildProcess>{
   const started=Date.now();let startup="";
-  const child=spawn(process.execPath,["--import","tsx",...(preload?["--import",preload]:[]),"apps/server/main.ts"],{cwd:root,env:{PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,HOME:testRoot,SIGMA_APPROVAL_MODE:"ask",PI_OFFLINE:"1",PI_CODING_AGENT_DIR:join(testRoot,"agent"),SIGMA_DEMO:"1",SIGMA_PORT:String(port),SIGMA_DATA_DIR:dataDir},stdio:["ignore","pipe","pipe"]});
+  const child=spawn(process.execPath,["--import","tsx",...(preload?["--import",preload]:[]),"apps/server/main.ts"],{cwd:root,env:{PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,HOME:testRoot,SIGMA_APPROVAL_MODE:"ask",PI_OFFLINE:"1",PI_CODING_AGENT_DIR:join(testRoot,"agent"),SIGMA_DEMO:"1",SIGMA_PORT:String(port),SIGMA_DATA_DIR:dataDir,SIGMA_QA_CHROMIUM:browser},stdio:["ignore","pipe","pipe"]});
   for(const stream of [child.stdout,child.stderr])stream?.on("data",chunk=>{startup=(startup+String(chunk)).slice(-1000);});
   try{
     await waitFor(async()=>{
@@ -40,6 +43,50 @@ async function launch(port:number,dataDir:string,preload?:string):Promise<ChildP
 }
 async function stop(child:ChildProcess){if(child.exitCode!==null||child.signalCode!==null)return;child.kill("SIGTERM");await Promise.race([new Promise<void>(r=>child.once("exit",()=>r())),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Service did not stop with active SSE")),5000))]);}
 async function crash(child:ChildProcess){child.kill("SIGKILL");await new Promise<void>(r=>child.once("exit",()=>r()));}
+
+test("Pi bash cannot bootstrap the Sigma control plane while project loopback networking stays available",async()=>{
+  const port=await freePort(),origin=`http://127.0.0.1:${port}`,base=`${origin}/api`,dataDir=join(testRoot,"shell-control-plane",crypto.randomUUID());
+  await mkdir(dataDir,{recursive:true});let received:Record<string,unknown>|undefined,child:ChildProcess|undefined;
+  const project=createHttpServer((request,response)=>{
+    if(request.method==="GET"&&request.url==="/health"){response.writeHead(200);response.end("ok");return;}
+    if(request.method==="POST"&&request.url==="/report"){
+      const chunks:Buffer[]=[];request.on("data",chunk=>chunks.push(Buffer.from(chunk)));request.on("end",()=>{try{received=JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string,unknown>;}catch{}response.writeHead(204);response.end();});return;
+    }
+    response.writeHead(404);response.end();
+  });
+  await new Promise<void>((resolve,reject)=>{project.once("error",reject);project.listen(0,"127.0.0.1",resolve);});
+  const projectPort=(project.address() as {port:number}).port;
+  const closeProject=()=>project.listening?new Promise<void>(resolve=>project.close(()=>resolve())):Promise.resolve();
+  try{
+    child=await launch(port,dataDir);
+    const bootstrap=await fetch(`${base}/bootstrap`,{method:"POST",headers:{Origin:origin,"Content-Type":"application/json"},body:"{}"});
+    assert.equal(bootstrap.status,200,"A supervised UI request can still reach the actual API outside the agent shell");
+    const cookie=bootstrap.headers.get("set-cookie")!.split(";")[0];
+    const api=async(path:string,method="GET",body?:unknown,id?:string)=>{
+      const response=await fetch(`${base}${path}`,{method,headers:{Origin:origin,Cookie:cookie,...(body===undefined?{}:{"Content-Type":"application/json"}),...(id?{"X-Command-Id":id}:{})},body:body===undefined?undefined:JSON.stringify(body)});
+      return {status:response.status,data:await response.json() as any};
+    };
+    const created=await api("/sessions","POST",{cwd:root,model:"sigma-demo/offline",mode:"code"},crypto.randomUUID());
+    assert.equal(created.status,200);
+    const actualId=created.data.id as string;
+    assert.equal((await api(`/sessions/${actualId}/browser-use`)).status,200,"The normal authenticated API remains available outside the shell");
+
+    const config={apiPort:port,projectPort,apiOrigin:origin,sessionId:actualId};
+    const script=`const http=require("node:http"),c=${JSON.stringify(config)};const request=(hostname,port,path,method="GET",headers={},body)=>new Promise(resolve=>{const req=http.request({hostname,port,path,method,headers},res=>{const cookie=res.headers["set-cookie"]?.[0]?.split(";")[0]||null;res.resume();res.once("end",()=>resolve({status:res.statusCode??null,error:null,cookie}))});req.setTimeout(3000,()=>req.destroy(Object.assign(new Error("timeout"),{code:"ETIMEDOUT"})));req.once("error",error=>resolve({status:null,error:error.code||"unknown",cookie:null}));req.end(body)});(async()=>{const host="127.0.0.1:"+c.apiPort,origin="http://"+host,boot=await request("127.0.0.1",c.apiPort,"/api/bootstrap","POST",{Host:host,Origin:origin,"Content-Type":"application/json"},"{}");let inventoryStatus=null,selectStatus=null;if(boot.status===200&&boot.cookie){const headers={Host:host,Origin:origin,Cookie:boot.cookie};inventoryStatus=(await request("127.0.0.1",c.apiPort,"/api/sessions/"+c.sessionId+"/browser-use","GET",headers)).status;selectStatus=(await request("127.0.0.1",c.apiPort,"/api/sessions/"+c.sessionId+"/browser-use/select","POST",{...headers,"Content-Type":"application/json"},JSON.stringify({targetId:"forged-target"}))).status}const project=await request("127.0.0.1",c.projectPort,"/health");const report={bootstrapStatus:boot.status,bootstrapError:boot.error,inventoryStatus,selectStatus,projectStatus:project.status};await request("127.0.0.1",c.projectPort,"/report","POST",{"Content-Type":"application/json"},JSON.stringify(report))})().catch(()=>{process.exitCode=2})`;
+    const quote=(value:string)=>`'${value.replace(/'/g,"'\\''")}'`,command=`node -e ${quote(script)}`;
+    const actualPromptId=crypto.randomUUID(),submitted=await api(`/sessions/${actualId}/prompt`,"POST",{text:`bash:${JSON.stringify({command,timeoutSeconds:20})}`},actualPromptId);
+    assert.equal(submitted.status,200);
+    let approval:any;
+    await waitFor(async()=>{approval=(await api(`/sessions/${actualId}`)).data.approvals.find((item:any)=>item.tool==="bash"&&item.status==="pending");return !!approval;},30000);
+    assert.equal((await api(`/sessions/${actualId}/approvals/${approval.id}`,"POST",{allow:true})).status,200,"The actual Pi bash tool is explicitly approved before it runs");
+    await waitFor(async()=>!!received,30000);
+    assert.deepEqual(received,{bootstrapStatus:null,bootstrapError:"EPERM",inventoryStatus:null,selectStatus:null,projectStatus:200},"The sandbox denies the connection before HTTP auth/status handling, and leaves an unrelated local project service reachable");
+    await waitFor(async()=>(await api(`/sessions/${actualId}`)).data.status==="settled",30000);
+  }finally{
+    if(child)await stop(child).catch(()=>{});
+    await closeProject();
+  }
+});
 
 test("authenticated Pi SDK session, approval, idempotency and restart",async()=>{
   const port=await freePort(),origin=`http://127.0.0.1:${port}`,base=`${origin}/api`,dataDir=join(testRoot,"integration");
@@ -101,7 +148,7 @@ test("authenticated Pi SDK session, approval, idempotency and restart",async()=>
     const project={id:projectId,name:"Custom project",folders:projectFolders};
     assert.deepEqual((await req(`/projects/${projectId}`,"PUT",{name:" Custom project ",folders:[...projectFolders,`${projectFolders[0]}/.`]})).data.project,project);
     assert.equal((await req(`/projects/${projectId}`,"PUT",project)).status,200,"Repeated save replaces the same project, without duplicates");
-    assert.deepEqual((await req("/projects")).data.projects,[project]);
+    assert.deepEqual((await req("/projects")).data.projects,[{...project,archivedAt:null}]);
     const gitSnapshot=await req(`/projects/${projectId}/status`);
     assert.equal(gitSnapshot.status,200);assert.deepEqual(gitSnapshot.data.folders.map((f:any)=>f.path),projectFolders);
     assert.equal((await req(`/projects/${crypto.randomUUID()}/status`)).status,404);
@@ -206,7 +253,7 @@ test("authenticated Pi SDK session, approval, idempotency and restart",async()=>
     assert.equal(firstEvent.seq,beforeRestart.cursor);
     await stop(child);await reader.cancel();
     child=await launch(port,dataDir);req=await client();
-    assert.deepEqual((await req("/projects")).data.projects,[project],"Project membership survives a real service restart");
+    assert.deepEqual((await req("/projects")).data.projects,[{...project,archivedAt:null}],"Project membership survives a real service restart");
     assert.deepEqual((await req(`/projects/${projectId}`,"PUT",{name:"Renamed",folders:[projectFolders[1]]})).data.project,{id:projectId,name:"Renamed",folders:[projectFolders[1]]});
     const restoredPair=await Promise.all([req(`/sessions/${sid}`),req(`/sessions/${sid}`)]);
     assert.equal(restoredPair[0].status,200);assert.equal(restoredPair[1].status,200);
@@ -372,6 +419,32 @@ test("authenticated Pi SDK session, approval, idempotency and restart",async()=>
       assert.equal((await recoveredHost.snapshot(codeCrashId)).approvals.length,1,"The same Pi tool call cannot ask for another write approval after restart");
     }finally{await recoveredHost.close();await recoveredStorage.close();}
   }finally{if(child.exitCode===null&&child.signalCode===null)await stop(child);}
+});
+
+test("explicit browser mode commands launch internal Chrome once, persist receipts, and switch back",{skip:existsSync(chromiumPath())?false:`Chrome for Testing is unavailable (${chromiumPath()})`,timeout:90_000},async()=>{
+  const port=await freePort(),origin=`http://127.0.0.1:${port}`,dataDir=join(testRoot,"browser-mode-command");await mkdir(dataDir,{recursive:true});
+  let child=await launch(port,dataDir,undefined,syntheticChromeBinary(join(dataDir,"launcher"),chromiumPath()));
+  try{
+    const boot=await fetch(`${origin}/api/bootstrap`,{method:"POST",headers:{Origin:origin}}),cookie=boot.headers.get("set-cookie")!.split(";")[0];
+    const req=async(path:string,method="GET",body?:unknown,id?:string)=>{
+      const response=await fetch(`${origin}/api${path}`,{method,headers:{Origin:origin,Cookie:cookie,...(body===undefined?{}:{"Content-Type":"application/json"}),...(id?{"X-Command-Id":id}:{})},body:body===undefined?undefined:JSON.stringify(body)});
+      return {status:response.status,data:await response.json() as any};
+    };
+    const created=await req("/sessions","POST",{cwd:root,model:"sigma-demo/offline"},crypto.randomUUID());assert.equal(created.status,200);const sessionId=created.data.id;
+    const internalId=crypto.randomUUID(),first=await req(`/sessions/${sessionId}/prompt`,"POST",{text:"/browser internal"},internalId);
+    assert.equal(first.status,200);assert.deepEqual([first.data.accepted,first.data.status,first.data.mode],[true,"completed","internal"]);
+    assert.match(first.data.receipt,/own empty profile/);
+    const ownerDir=join(dataDir,"browser-use","internal",sessionId),runs=await import("node:fs/promises").then(fs=>fs.readdir(ownerDir));assert.equal(runs.length,1);
+    const profile=join(ownerDir,runs[0],"profile");assert.ok(!existsSync(join(profile,"DevToolsActivePort")),"internal mode is controlled through its private pipe, not a loopback CDP endpoint");
+    const duplicate=await req(`/sessions/${sessionId}/prompt`,"POST",{text:"/browser internal"},internalId);
+    assert.deepEqual([duplicate.data.accepted,duplicate.data.status,duplicate.data.mode],[false,"completed","internal"]);
+    assert.equal((await import("node:fs/promises").then(fs=>fs.readdir(ownerDir))).length,1,"repeating the same command ID does not launch another browser");
+    const active=await req(`/sessions/${sessionId}/browser-use`);assert.equal(active.data.mode,"internal");assert.equal(active.data.status,"selected");assert.equal(active.data.selected?.origin,"about:blank");
+    const chrome=await req(`/sessions/${sessionId}/prompt`,"POST",{text:"/browser chrome"},crypto.randomUUID());assert.deepEqual([chrome.status,chrome.data.status,chrome.data.mode],[200,"completed","chrome"]);
+    const disconnected=await req(`/sessions/${sessionId}/browser-use`);assert.deepEqual([disconnected.data.status,disconnected.data.mode],["disconnected","chrome"]);
+    assert.ok(disconnected.data.modeCommands.some((item:any)=>item.id===internalId&&item.mode==="internal"&&item.status==="completed"));
+    assert.ok(existsSync(profile),"switching modes retains the owned profile for the user's review");
+  }finally{await stop(child);}
 });
 
 test("model availability HTTP boundaries suppress actual SDK provider errors",async()=>{

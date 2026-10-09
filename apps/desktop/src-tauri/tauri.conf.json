@@ -1,7 +1,7 @@
 {
   "$schema": "../../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Sigma",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "identifier": "dev.sigma.app",
   "build": { "frontendDist": "../../../.scratch/desktop-runtime/dist/web" },
   "app": {

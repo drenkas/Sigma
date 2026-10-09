@@ -50,6 +50,7 @@ Rust-тести: `cargo test` у `apps/desktop/src-tauri` (після `cargo fet
 
 ## Що лишається відкритим
 
+- **[ZENTAB](docs/ZENTAB.md): browser control** — full serial `npm run check` 178/178 і `npm run build` пройшли; CFT-тест підтверджує selected-tab redirect/approval/screenshot guard. Лишається: підключення до особистого Chrome (потрібне підтвердження в Chrome), external live vision для image-capable provider, native Tauri runtime, коміт із bump до 0.9.0.
 - **Desktop QA** (TCC preflight, UID lock, native helper) — відкладено.
 - **Pi SDK auth:** успішний callback/manual fallback, інші SDK flows, expiry/quota/errors.
 - **Performance:** Pi → SSE → paint, CPU/RAM всього дерева, slow-client recovery; повний accessibility/VoiceOver gate.

@@ -5,6 +5,7 @@ import { api } from "./api.js";
 import { Projects } from "./Projects.js";
 import { Changes } from "./Changes.js";
 import { Qa } from "./Qa.js";
+import { BrowserUsePanel } from "./BrowserUse.js";
 import { WorkerMerges } from "./WorkerMerges.js";
 import { Logo } from "./Logo.js";
 import { Graph } from "./Graph.js";
@@ -278,7 +279,7 @@ function App(){
       if(event.type==="approval")setCurrent(x=>x?{...x,approvals:x.approvals.some(a=>a.id===event.payload.id)?x.approvals:[event.payload,...x.approvals]}:x);
       if(event.type==="approval_decision"){setCurrent(x=>x?{...x,approvals:x.approvals.map(a=>a.id===event.payload.id?{...a,status:event.payload.status}:a)}:x);setDeciding(x=>x.filter(d=>d!==event.payload.id));handoffFocus();}
       if(event.type==="write_outcome"){setCurrent(x=>x?{...x,approvals:x.approvals.map(a=>a.id===event.payload.id?{...a,outcome:event.payload.outcome}:a)}:x);setEvidenceVersion(x=>x+1);}
-      if(event.type==="check_changed"||event.type==="review_changed"||event.type==="source_apply_changed"||event.type==="worker_merge_changed"||event.type==="repository_changed"||event.type==="qa_changed")setEvidenceVersion(x=>x+1);
+      if(event.type==="check_changed"||event.type==="review_changed"||event.type==="source_apply_changed"||event.type==="worker_merge_changed"||event.type==="repository_changed"||event.type==="qa_changed"||event.type==="browser_use_changed"||event.type==="browser_mode_command")setEvidenceVersion(x=>x+1);
       if(event.type==="agy_activity"){const record=event.payload as AgyRecord;setAgyActivity(x=>{const at=x.findIndex(item=>item.agentId===record.agentId&&item.step===record.step);return at>=0?x.map((item,index)=>index===at?record:item):[...x.slice(-299),record];});}
       if(event.type==="tool"){setTools(x=>[...x.slice(-11),event.payload]);if(event.payload.status==="error")sync();}
       if(event.type==="error"){fail(event.payload.message);sync();}
@@ -363,7 +364,9 @@ function App(){
       if(task)await selectTask(task);else throw new Error("Task was created but its snapshot is unavailable. Refresh the task list before continuing.");
     }catch(e){fail(e);void refreshTasks().catch(()=>{});void refreshWorkspaceRecovery().catch(()=>{});}finally{setTaskBusy(false);}
   }
-  async function send(){const text=prompt().trim(),s=current();if(!s||!text||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),reuse=saved?.text===text,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior}));try{const result=await api<{accepted:boolean;status:string}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior},id);if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);prompts.delete(s.id);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
+  async function send(){const text=prompt().trim(),s=current();if(!s||!text||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),reuse=saved?.text===text,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior}));try{const result=await api<{accepted:boolean;status:string;receipt?:string;mode?:"chrome"|"internal"}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior},id);if(text==="/browser internal"||text==="/browser chrome"){
+      sessionStorage.removeItem(key);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();setNotice({kind:result.status==="completed"?"info":"warning",text:result.receipt??(result.status==="completed"?`Browser mode changed to ${result.mode}.`:`Browser mode command is ${result.status}; inspect Browser control before trying again.`)});void refresh().catch(()=>{});return;
+    }if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);prompts.delete(s.id);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
   async function stop(){const s=current();if(!s)return;try{await api(`/sessions/${s.id}/abort`,"POST",{});}catch(e){fail(e);}}
   async function stopChild(agent:AgentView){
     const s=current();if(!s||offline()||stoppingChildren().includes(agent.id))return;
@@ -695,6 +698,7 @@ function App(){
             </dl>
             <Show when={childTrouble().length}><p class="callout error-callout">{childTrouble().length} child agent{childTrouble().length===1?"":"s"} ended in {[...new Set(childTrouble().map(a=>RUN[a.status].label.toLowerCase()))].join(" / ")}. The root result does not replace these outcomes.</p></Show>
           </section>
+          <BrowserUsePanel id={current()!.id} revision={evidenceVersion()}/>
           <section class="panel" ref={treeSection} tabindex="-1" aria-labelledby="h-tree">
             <h3 id="h-tree" class="panel-title">Agent tree <span class="count">{agents().length}</span></h3>
             <ul class="tree">
@@ -926,7 +930,7 @@ function App(){
               <div class="approval-text">
                 <div><strong>{roleOf(a.agentId)}</strong> wants to run <code>{a.tool}</code></div>
                 <Show when={a.tool==="bash"} fallback={<div class="mono approval-path" title={a.preview}>{a.preview.replace(/^\S+\s/,"")}</div>}><pre class="change-diff" tabindex="0" aria-label="Command to run">{a.preview.replace(/^\S+\s/,"")}</pre></Show><Show when={a.git}><pre class="recovery-text">{a.git!.message}</pre><p class="mono small">Parent {a.git!.parent} · Tree {a.git!.tree}</p><pre class="change-diff" tabindex="0">{a.git!.diff}</pre></Show>
-                <div class="muted small">{a.tool==="bash"?"Runs a shell command on this computer in the agent's folder; Sigma's credential and data folders are blocked":a.tool==="git_commit"?"Creates a Git commit in the selected folder":a.change?workspaceKind(current())==="direct"?"Write to selected folder":"Write to isolated workspace":"Read-only"} · applies to this call only · requested {clock(a.createdAt)}</div>
+                <div class="muted small">{a.tool==="bash"?"Runs a shell command on this computer in the agent's folder; Sigma's credential and data folders are blocked":a.tool==="git_commit"?"Creates a Git commit in the selected folder":a.tool==="browser_action"?"Controls the selected tab in the active browser mode; screenshots may be saved in Pi and Sigma history":a.change?workspaceKind(current())==="direct"?"Write to selected folder":"Write to isolated workspace":"Read-only"} · applies to this call only · requested {clock(a.createdAt)}</div>
                 <Show when={a.change}><pre class="change-diff" tabindex="0" aria-label={`Proposed change to ${a.change!.path}`}>{a.change!.diff}</pre></Show>
               </div>
               <div class="approval-actions">

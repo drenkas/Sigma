@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { PiHost } from "./pi-host.js";
 import { Verification } from "./verification.js";
 import { Qa } from "./qa-runs.js";
+import { BrowserUse } from "./browser-use.js";
+import { InternalChrome } from "./internal-chrome.js";
 import { SourceApply } from "./source-apply.js";
 import { WorkerMerge } from "./worker-merge.js";
 import { Storage } from "./storage.js";
@@ -41,8 +43,10 @@ const storage=new Storage(join(dataDir,"state.sqlite"));
 const app=Fastify({logger:false,bodyLimit:100_000});
 const port=Number(setting("PORT")||4318);
 if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid local port");
+const devUiPort=4317;
 const devOrigin=setting("DEV_ORIGIN")==="1";
-const acceptedOrigins=new Set([`http://127.0.0.1:${port}`,...(devOrigin?["http://127.0.0.1:4317"]:[])]);
+const controlPlanePorts=[port,...(devOrigin?[devUiPort]:[])];
+const acceptedOrigins=new Set([`http://127.0.0.1:${port}`,...(devOrigin?[`http://127.0.0.1:${devUiPort}`]:[])]);
 const cookie=randomBytes(32).toString("hex");
 const cookieName=`pi_session_${port}`;
 const listeners=new Map<string,Set<(event:JournalEvent|{type:string;payload:unknown})=>void>>();
@@ -53,7 +57,7 @@ async function emit(sessionId:string,type:string,payload:unknown,durable=false){
   const event=durable?await storage.event(sessionId,type,payload):{type,payload};
   for(const listener of listeners.get(sessionId)||[])listener(event);
 }
-const host=new PiHost(storage,dataDir,emit);
+const host=new PiHost(storage,dataDir,emit,controlPlanePorts);
 await host.init();
 // Packaged runtime carries an optional pinned proxy binary under resources/; absent in dev, where provisioning reports not_installed.
 const localProxy=new CliproxyProcess(dataDir,{binarySource:fileURLToPath(new URL(`../../resources/cliproxyapi/${PINNED_BINARY_NAME}`,import.meta.url))});
@@ -61,6 +65,9 @@ const proxyView=(view:ReturnType<typeof host.cliproxyProviders.view>)=>({...view
 const verification=new Verification(storage,host,dataDir,emit);
 const qa=new Qa(storage,host,dataDir,emit);
 host.attachQa(qa);
+const internalChrome=new InternalChrome(dataDir);
+const browserUse=new BrowserUse(storage,dataDir,emit,undefined,internalChrome,controlPlanePorts);
+host.attachBrowserUse(browserUse);
 const sourceApply=new SourceApply(storage,host,verification,dataDir,emit);
 const workerMerge=new WorkerMerge(storage,host,dataDir,emit);
 host.setAutoMerger((rootId,workerId)=>workerMerge.auto(rootId,workerId));
@@ -70,7 +77,7 @@ app.addHook("onRequest",async(req,reply)=>{
   reply.header("Content-Security-Policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost");
   reply.header("X-Content-Type-Options","nosniff");reply.header("Referrer-Policy","no-referrer");
   const h=req.headers.host||"";
-  if(![`127.0.0.1:${port}`,...(devOrigin?["127.0.0.1:4317"]:[])].includes(h)){reply.code(403).send({error:"Local host required"});return;}
+  if(![`127.0.0.1:${port}`,...(devOrigin?[`127.0.0.1:${devUiPort}`]:[])].includes(h)){reply.code(403).send({error:"Local host required"});return;}
   const origin=req.headers.origin;
   if(origin&&!acceptedOrigins.has(origin)){reply.code(403).send({error:"Origin denied"});return;}
   if(appClosing&&req.method!=="GET"){reply.code(503).send({error:"Service is shutting down"});return;}
@@ -343,6 +350,27 @@ app.get<{Params:{id:string;artifactId:string}}>("/api/sessions/:id/qa/artifacts/
   try{const artifact=await qa.artifact(req.params.id,req.params.artifactId);return reply.header("Content-Type",artifact.mime).header("X-Content-Type-Options","nosniff").header("Cache-Control","private, max-age=31536000, immutable").header("Content-Disposition","inline").send(artifact.bytes);}
   catch{return reply.code(404).send({error:"Artifact unavailable"});}
 });
+app.get<{Params:{id:string}}>("/api/sessions/:id/browser-use",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");try{return await browserUse.view(req.params.id);}catch{return reply.code(409).send({error:"Chrome browser status is unavailable for this session"});}
+});
+app.post<{Params:{id:string};Body:{address?:unknown}}>("/api/sessions/:id/browser-use/connect",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");try{return await browserUse.connect(req.params.id,req.body?.address,check=>host.withPromptAdmission(req.params.id,async admission=>{check();admission.check();}));}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Chrome connection unavailable"});}
+});
+app.post<{Params:{id:string}}>("/api/sessions/:id/browser-use/refresh",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");try{return await browserUse.refresh(req.params.id);}catch{return reply.code(409).send({error:"Chrome tabs could not be refreshed; reconnect or inspect Chrome"});}
+});
+app.post<{Params:{id:string};Body:{targetId?:unknown}}>("/api/sessions/:id/browser-use/select",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");if(typeof req.body?.targetId!=="string")return reply.code(400).send({error:"Choose an existing Chrome tab"});
+  try{return await browserUse.select(req.params.id,req.body.targetId);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Chrome tab selection unavailable"});}
+});
+app.post<{Params:{id:string}}>("/api/sessions/:id/browser-use/disconnect",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");try{return await browserUse.disconnect(req.params.id);}catch{return reply.code(409).send({error:"Chrome could not be disconnected"});}
+});
+app.get<{Params:{id:string;artifactId:string}}>("/api/sessions/:id/browser-use/artifacts/:artifactId",async(req,reply)=>{
+  if(!isUUID(req.params.artifactId))return reply.code(400).send({error:"Valid artifact ID required"});
+  try{const artifact=await browserUse.artifact(req.params.id,req.params.artifactId);return reply.header("Content-Type","image/png").header("X-Content-Type-Options","nosniff").header("Cache-Control","private, max-age=31536000, immutable").header("Content-Disposition","inline").send(artifact.bytes);}
+  catch{return reply.code(404).send({error:"Artifact unavailable"});}
+});
 app.get<{Params:{id:string}}>("/api/sessions/:id/source-applies",async(req,reply)=>{
   try{return {applies:await sourceApply.evidence(req.params.id)};}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Source Apply unavailable"});}
 });
@@ -392,6 +420,34 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",async(req,reply)=>{
   if(typeof text!=="string"||!text.trim()||text.length>20_000||!(behavior===undefined||behavior==="steer"||behavior==="followUp"))return reply.code(400).send({error:"Invalid prompt"});
   const commandId=req.headers["x-command-id"];
   if(typeof commandId!=="string"||!isUUID(commandId))return reply.code(400).send({error:"Command ID required"});
+  const modeCommand=text.trim()==="/browser internal"?"internal":text.trim()==="/browser chrome"?"chrome":undefined;
+  if(modeCommand&&reviewId===undefined){
+    try{
+      return await host.withPromptAdmission(req.params.id,async admission=>{
+        const requestHash=createHash("sha256").update(`browser-mode\0${modeCommand}`).digest("hex");
+        const command=await storage.call<{fresh:boolean;status:string}>("command",{id:commandId,sessionId:req.params.id,kind:"browser_mode",requestHash,inputText:`/browser ${modeCommand}`,behavior:modeCommand});
+        if(!command.fresh)return {accepted:false,status:command.status,mode:modeCommand,receipt:command.status==="completed"?`/browser ${modeCommand} already completed.`:`/browser ${modeCommand} is ${command.status}. Inspect Browser control before trying anything again.`};
+        let dispatched=false;
+        try{
+          admission.check();
+          await storage.call("commandStatus",{id:commandId,status:"dispatched"});dispatched=true;
+          await emit(req.params.id,"browser_mode_command",{sessionId:req.params.id,commandId,mode:modeCommand,status:"starting"},true);
+          admission.check();
+          await browserUse.setMode(req.params.id,modeCommand,admission.check);
+          admission.check();
+          await storage.call("commandStatus",{id:commandId,status:"completed"});
+          const receipt=modeCommand==="internal"?"Internal Chrome is open with its own empty profile. Sign in manually if needed; no Chrome data was copied.":"Normal Chrome mode is active. Connect from Browser control and approve Chrome's permission prompt.";
+          await emit(req.params.id,"browser_mode_command",{sessionId:req.params.id,commandId,mode:modeCommand,status:"completed"},true);
+          return {accepted:true,status:"completed",mode:modeCommand,receipt};
+        }catch(error){
+          const status=dispatched?"unknown":"rejected";
+          await storage.call("commandStatus",{id:commandId,status}).catch(()=>{});
+          await emit(req.params.id,"browser_mode_command",{sessionId:req.params.id,commandId,mode:modeCommand,status},true).catch(()=>{});
+          return reply.code(409).send({status,mode:modeCommand,error:error instanceof Error?error.message:"Browser mode command could not be completed"});
+        }
+      });
+    }catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Browser mode command rejected"});}
+  }
   try{
     return await host.withPromptAdmission(req.params.id,async promptAdmission=>{
       let submitted=text,review: {id:string;agentId:string;revision:string}|undefined;
@@ -509,12 +565,12 @@ app.get("/*",async(req,reply)=>{
 });
 let shutdownWork:Promise<void>|undefined;
 shutdown=()=>shutdownWork??=(async()=>{
-  appClosing=true;localProxy.cancelStartup();host.beginShutdown();workerMerge.beginClose();sourceApply.beginClose();verification.beginClose();qa.beginClose();
+  appClosing=true;localProxy.cancelStartup();browserUse.beginClose();host.beginShutdown();workerMerge.beginClose();sourceApply.beginClose();verification.beginClose();qa.beginClose();
   pickerShutdown.abort();
   const failures:unknown[]=[];
   const settle=(work:()=>unknown|Promise<unknown>)=>{try{return Promise.resolve(work()).catch(error=>{failures.push(error);});}catch(error){failures.push(error);return Promise.resolve();}};
   await Promise.all([
-    settle(()=>workerMerge.close()),settle(()=>sourceApply.close()),settle(()=>verification.close()),settle(()=>qa.close()),
+    settle(()=>browserUse.close()),settle(()=>workerMerge.close()),settle(()=>sourceApply.close()),settle(()=>verification.close()),settle(()=>qa.close()),
     settle(()=>host.close()),settle(()=>serviceListening?app.close():undefined),...[...streamClosers].map(close=>settle(close)),
   ]);
   await settle(()=>localProxy.close());

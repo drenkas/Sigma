@@ -19,7 +19,7 @@ async function git(cwd:string,...args:string[]){await exec("git",["-c","core.hoo
 test("offline Pi file tools guard credential aliases and bind approval to the actual read descriptor",async()=>{
   const data=join(fixture,"data"),outside=join(fixture,"outside");await mkdir(data);await mkdir(outside);
   const sentinel="sigma-f1-f2-synthetic-protected-bytes",outsideSentinel="sigma-f1-f2-synthetic-outside-bytes";
-  const protectedFiles=["data/antigravity-profile/.gemini/antigravity-cli/auth_tokens.json","data/cliproxyapi/provider-token.json","data/agent/token.txt","sdk/provider-token.txt"];
+  const protectedFiles=["data/antigravity-profile/.gemini/antigravity-cli/auth_tokens.json","data/cliproxyapi/provider-token.json","data/agent/token.txt","sdk/provider-token.txt","Library/Application Support/Google/Chrome/Default/Cookies","data/browser-use/session/screenshot.png"];
   for(const path of protectedFiles){await mkdir(join(fixture,path,".."),{recursive:true});await writeFile(join(fixture,path),sentinel);}
   await writeFile(join(outside,"sentinel.txt"),outsideSentinel);await writeFile(join(fixture,"safe.txt"),"first\nsecond\nthird\n");
   await writeFile(join(fixture,".gitignore"),"*\n!safe.txt\n!new.txt\n!.gitignore\n!write-parent/\n!write-parent/view.txt\n");

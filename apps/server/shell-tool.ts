@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { chromeUserDataDir } from "./chrome-path.js";
 
 /** Runs agent shell commands on the host inside a macOS sandbox-exec profile that denies Sigma's credential files. */
 export const SANDBOX_EXEC="/usr/bin/sandbox-exec";
@@ -28,36 +29,39 @@ function canonical(path:string):string{
   }
 }
 
-/** What the sandbox denies: credential files, credential-only folders, and well-known credential file names under hidden home folders. Everything else stays readable and writable. */
-export type Protected={files:string[];dirs:string[];patterns:string[]};
+/** Filesystem credentials plus local Sigma control-plane ports denied to agent shell commands. */
+export type Protected={files:string[];dirs:string[];patterns:string[];loopbackPorts:number[]};
 const CREDENTIAL_NAMES=["auth.json","credentials.json",".credentials.json","oauth_creds.json","google_accounts.json"];
 const regexEscape=(text:string)=>text.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
 const both=(paths:string[])=>[...new Set(paths.flatMap(path=>[resolve(path),canonical(path)]))];
 
-export function protectedRoots(dataDir:string,agentDir:string,home=process.env.HOME,extraDataDir=process.env.SIGMA_DATA_DIR):Protected{
+export function protectedRoots(dataDir:string,agentDir:string,home=process.env.HOME,extraDataDir=process.env.SIGMA_DATA_DIR,loopbackPorts:readonly number[]=[]):Protected{
+  if(loopbackPorts.some(port=>!Number.isInteger(port)||port<1||port>65535))throw new Error("Invalid protected loopback port");
   const dataDirs=[dataDir,...(extraDataDir?[extraDataDir]:[])],files:string[]=[],dirs:string[]=[];
   for(const data of dataDirs){
     files.push(...["agent-access.json","native-providers.json","state.sqlite","state.sqlite-wal","state.sqlite-shm","sigma.lock"].map(name=>join(data,name)));
-    dirs.push(join(data,"git-intents"),join(data,"cliproxyapi"),join(data,"antigravity-profile"));
+    dirs.push(join(data,"git-intents"),join(data,"cliproxyapi"),join(data,"antigravity-profile"),join(data,"browser-use"));
     // Pi SDK keeps provider keys in the agent folder; its sessions, settings and the rest stay readable.
     for(const sdk of [join(data,"agent")])files.push(...["auth.json","models.json","models-store.json"].map(name=>join(sdk,name)));
   }
   files.push(...["auth.json","models.json","models-store.json"].map(name=>join(agentDir,name)));
   const patterns:string[]=[];
   if(home){
+    dirs.push(chromeUserDataDir(home));
     files.push(join(home,".codex","auth.json"),join(home,".gemini","oauth_creds.json"),join(home,".gemini","google_accounts.json"),join(home,".claude",".credentials.json"),join(home,".claude","credentials.json"));
     dirs.push(join(home,".cli-proxy-api"));
     // Credential file names anywhere inside hidden folders of the home directory (tool config folders), never in ordinary project folders.
     for(const base of both([home]))patterns.push(`^${regexEscape(base)}/\\.[^/]+/(.*/)?(${CREDENTIAL_NAMES.map(regexEscape).join("|")})$`);
   }
-  return {files:both(files),dirs:both(dirs),patterns:[...new Set(patterns)]};
+  return {files:both(files),dirs:both(dirs),patterns:[...new Set(patterns)],loopbackPorts:[...new Set(loopbackPorts)]};
 }
 
 const quote=(path:string)=>JSON.stringify(path);
-/** SBPL: everything allowed (network, home, processes, workspaces), then only credential files and credential folders denied for reads and writes. */
+/** SBPL preserves ordinary project networking while denying Sigma credentials and its local control-plane ports. */
 export function sandboxProfile(denied:Protected):string{
   return [
     "(version 1)","(allow default)",
+    ...denied.loopbackPorts.map(port=>`(deny network-outbound (remote ip ${quote(`localhost:${port}`)}))`),
     ...denied.dirs.map(path=>`(deny file-read* file-write* (subpath ${quote(path)}))`),
     ...denied.files.map(path=>`(deny file-read* file-write* (literal ${quote(path)}))`),
     ...denied.patterns.map(pattern=>`(deny file-read* file-write* (regex #"${pattern.replace(/"/g,'\\"')}"))`),

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer, request as httpRequest } from "node:http";
 import { mkdir, readFile, writeFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { formatShellResult, killAllShells, protectedRoots, runShell, runningShells, sandboxProfile, scrubEnv } from "./shell-tool.js";
@@ -8,11 +9,14 @@ const root=resolve(import.meta.dirname,"../.."),scratch=join(process.env.SIGMA_T
 async function fixture(){
   await mkdir(scratch,{recursive:true});
   const base=await realpath(scratch),data=join(base,"data"),agent=join(base,"pi-agent"),work=join(data,"workspaces","w1"),outside=join(base,"project");
-  for(const dir of [join(data,"cliproxyapi"),join(data,"antigravity-profile"),agent,work,outside])await mkdir(dir,{recursive:true});
+  for(const dir of [join(data,"cliproxyapi"),join(data,"antigravity-profile"),join(data,"browser-use"),agent,work,outside])await mkdir(dir,{recursive:true});
   await writeFile(join(data,"agent-access.json"),'{"mode":"full"}');await writeFile(join(data,"cliproxyapi","auth.json"),"SECRET-PROXY");await writeFile(join(agent,"auth.json"),"SECRET-SDK");await writeFile(join(data,"state.sqlite"),"SECRET-STATE");
-  const home=join(base,"home");await mkdir(join(home,".codex"),{recursive:true});await mkdir(join(home,".gemini"),{recursive:true});await mkdir(join(home,".cli-proxy-api"),{recursive:true});await mkdir(join(home,".tool","nested"),{recursive:true});
+  const home=join(base,"home");await mkdir(join(home,".codex"),{recursive:true});await mkdir(join(home,".gemini"),{recursive:true});await mkdir(join(home,".cli-proxy-api"),{recursive:true});await mkdir(join(home,".tool","nested"),{recursive:true});await mkdir(join(home,"Library/Application Support/Google/Chrome/Default"),{recursive:true});
+  await mkdir(join(data,"browser-use","session"),{recursive:true});
   await writeFile(join(home,".codex","auth.json"),"SECRET-CODEX");await writeFile(join(home,".codex","config.toml"),"public-codex");await writeFile(join(home,".gemini","oauth_creds.json"),"SECRET-GEMINI");await writeFile(join(home,".gemini","settings.json"),"public-gemini");
   await writeFile(join(home,".cli-proxy-api","a.json"),"SECRET-PROXYHOME");await writeFile(join(home,".tool","nested","credentials.json"),"SECRET-GENERIC");await writeFile(join(home,".tool","config.txt"),"public-tool");
+  await writeFile(join(home,"Library/Application Support/Google/Chrome/Default/Cookies"),"SYNTHETIC-CHROME-SESSION");
+  await writeFile(join(data,"browser-use","session","screenshot.png"),"SYNTHETIC-BROWSER-PAGE-IMAGE");
   await writeFile(join(data,"sessions.txt"),"public-data");await writeFile(join(agent,"settings.json"),"public-agent");await writeFile(join(outside,"auth.json"),"public-project-auth");
   const denied=protectedRoots(data,agent,home,undefined);
   return {base,home,data,agent,work,outside,denied,run:(command:string,extra:Partial<Parameters<typeof runShell>[0]>={})=>runShell({command,cwd:extra.cwd??outside,timeoutMs:20_000,denied,...extra})};
@@ -21,12 +25,36 @@ async function fixture(){
 test("protected paths cover credential files and credential-only folders, not whole folders", async()=>{
   const f=await fixture(),roots=protectedRoots(f.data,f.agent,"/Users/example","/elsewhere/data");
   for(const expected of [join(f.data,"agent-access.json"),join(f.data,"native-providers.json"),join(f.data,"state.sqlite"),join(f.data,"state.sqlite-wal"),join(f.data,"sigma.lock"),join(f.agent,"auth.json"),join(f.data,"agent","auth.json"),"/elsewhere/data/agent-access.json","/Users/example/.codex/auth.json","/Users/example/.gemini/oauth_creds.json","/Users/example/.gemini/google_accounts.json","/Users/example/.claude/.credentials.json","/Users/example/.claude/credentials.json"])assert.ok(roots.files.includes(expected),`${expected} must be denied`);
-  for(const expected of [join(f.data,"cliproxyapi"),join(f.data,"antigravity-profile"),join(f.data,"git-intents"),"/elsewhere/data/cliproxyapi","/Users/example/.cli-proxy-api"])assert.ok(roots.dirs.includes(expected),`${expected} must be denied`);
+  for(const expected of [join(f.data,"cliproxyapi"),join(f.data,"antigravity-profile"),join(f.data,"git-intents"),join(f.data,"browser-use"),"/elsewhere/data/cliproxyapi","/Users/example/.cli-proxy-api","/Users/example/Library/Application Support/Google/Chrome"])assert.ok(roots.dirs.includes(expected),`${expected} must be denied`);
   for(const whole of [f.data,f.agent,"/elsewhere/data","/Users/example","/Users/example/.gemini","/Users/example/.claude","/Users/example/.codex",join(f.data,"workspaces")])assert.ok(![...roots.dirs,...roots.files].includes(whole),`${whole} must stay accessible`);
   const profile=sandboxProfile(roots);
   assert.match(profile,/^\(version 1\)\n\(allow default\)/);
   assert.ok(profile.includes(`(deny file-read* file-write* (literal ${JSON.stringify(join(f.data,"agent-access.json"))}))`));
   assert.doesNotMatch(profile,/\(allow file-/);
+  assert.throws(()=>protectedRoots(f.data,f.agent,f.home,undefined,[0]),/Invalid protected loopback port/);
+  assert.throws(()=>protectedRoots(f.data,f.agent,f.home,undefined,[65536]),/Invalid protected loopback port/);
+});
+
+test("sandbox blocks protected loopback control-plane ports across aliases while project networking stays available",async()=>{
+  const f=await fixture(),protectedServer=createServer((_request,response)=>{response.writeHead(200);response.end("protected fixture");}),projectServer=createServer((_request,response)=>{response.writeHead(200);response.end("project fixture");});
+  const listen=(server:ReturnType<typeof createServer>,host:string)=>new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen({port:0,host,ipv6Only:false},resolve);});
+  const close=(server:ReturnType<typeof createServer>)=>server.listening?new Promise<void>(resolve=>server.close(()=>resolve())):Promise.resolve();
+  const request=(hostname:string,port:number)=>new Promise<{status:number|null;error:string|null}>(resolve=>{
+    const req=httpRequest({hostname,port,path:"/"},response=>{response.resume();response.once("end",()=>resolve({status:response.statusCode??null,error:null}));});
+    req.once("error",error=>resolve({status:null,error:(error as NodeJS.ErrnoException).code??"unknown"}));req.end();
+  });
+  try{
+    await listen(protectedServer,"::");await listen(projectServer,"127.0.0.1");
+    const protectedPort=(protectedServer.address() as {port:number}).port,projectPort=(projectServer.address() as {port:number}).port,aliases=["127.0.0.1","localhost","::1","::ffff:127.0.0.1"];
+    for(const host of aliases)assert.deepEqual(await request(host,protectedPort),{status:200,error:null},`${host} reaches the live dual-stack fixture before sandboxing`);
+    assert.deepEqual(await request("127.0.0.1",projectPort),{status:200,error:null},"The allowed project fixture is live before sandboxing");
+    const denied=protectedRoots(f.data,f.agent,f.home,undefined,[protectedPort]);
+    const script=`const http=require("node:http"),hosts=${JSON.stringify(aliases)};const connect=(hostname,port)=>new Promise(resolve=>{const req=http.get({hostname,port,path:"/"},res=>{res.resume();res.once("end",()=>resolve({status:res.statusCode??null,error:null}))});req.once("error",error=>resolve({status:null,error:error.code??"unknown"}))});(async()=>{const protectedResults=[];for(const host of hosts)protectedResults.push(await connect(host,${protectedPort}));const project=await connect("127.0.0.1",${projectPort});console.log(JSON.stringify({protectedResults,project}))})().catch(()=>{process.exitCode=2})`;
+    const quote=(value:string)=>`'${value.replace(/'/g,"'\\''")}'`,result=await runShell({command:`node -e ${quote(script)}`,cwd:f.outside,timeoutMs:20_000,denied});
+    assert.equal(result.exitCode,0,result.output);const report=JSON.parse(result.output.trim());
+    assert.deepEqual(report.protectedResults,aliases.map(()=>({status:null,error:"EPERM"})),"SBPL denies IPv4, localhost, IPv6 loopback and IPv4-mapped loopback before the listener responds");
+    assert.deepEqual(report.project,{status:200,error:null},"Unlisted local project endpoints retain network access");
+  }finally{await Promise.all([close(protectedServer),close(projectServer)]);}
 });
 
 test("scrubEnv strips Sigma internals and provider keys but keeps the toolchain", ()=>{
@@ -45,7 +73,7 @@ test("commands run in the given folder, return output and the real exit code", a
 
 test("the sandbox denies credential files but leaves sibling files, folders and workspaces usable", async()=>{
   const f=await fixture();
-  for(const secret of [join(f.data,"cliproxyapi","auth.json"),join(f.agent,"auth.json"),join(f.data,"state.sqlite"),join(f.data,"agent-access.json"),join(f.home,".codex","auth.json"),join(f.home,".gemini","oauth_creds.json"),join(f.home,".cli-proxy-api","a.json"),join(f.home,".tool","nested","credentials.json")]){
+  for(const secret of [join(f.data,"cliproxyapi","auth.json"),join(f.agent,"auth.json"),join(f.data,"state.sqlite"),join(f.data,"agent-access.json"),join(f.home,".codex","auth.json"),join(f.home,".gemini","oauth_creds.json"),join(f.home,".cli-proxy-api","a.json"),join(f.home,".tool","nested","credentials.json"),join(f.home,"Library/Application Support/Google/Chrome/Default/Cookies"),join(f.data,"browser-use","session","screenshot.png")]){
     const read=await f.run(`cat ${JSON.stringify(secret)}`);assert.notEqual(read.exitCode,0,secret);assert.doesNotMatch(read.output,/SECRET-/);assert.match(read.output,/Operation not permitted/);
   }
   assert.notEqual((await f.run(`echo hacked > ${JSON.stringify(join(f.data,"agent-access.json"))}`)).exitCode,0);

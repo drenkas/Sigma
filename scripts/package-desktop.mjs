@@ -100,7 +100,7 @@ await writeFile(ownerFile, "scripts/package-desktop.mjs\n");
 await cp(join(emit, "apps/server"), join(stage, "apps/server"), { recursive: true });
 await cp(join(emit, "packages/contracts"), join(stage, "packages/contracts"), { recursive: true });
 await cp(join(root, "dist/web"), join(stage, "dist/web"), { recursive: true });
-for (const file of ["storage-worker.mjs", "check-watchdog.mjs", "native-cli-watchdog.mjs", "cliproxy-config.mjs", "cliproxy-watchdog.mjs"]) {
+for (const file of ["storage-worker.mjs", "check-watchdog.mjs", "native-cli-watchdog.mjs", "qa-browser-watchdog.mjs", "cliproxy-config.mjs", "cliproxy-watchdog.mjs"]) {
   await cp(join(root, "apps/server", file), join(stage, "apps/server", file));
 }
 await mkdir(join(stage, "bin"), { recursive: true });
@@ -184,7 +184,7 @@ if (proxyLicenseText) {
 }
 await writeFile(join(stage, "THIRD-PARTY-NOTICES.md"), `${notices.join("\n")}\n`);
 
-const files = ["apps/server/main.js", "apps/server/data-lease.js", "apps/server/cliproxy-process.js", "apps/server/cliproxy-provision.js", "apps/server/cliproxy-config.mjs", "apps/server/cliproxy-watchdog.mjs", "apps/server/storage-worker.mjs", "apps/server/check-watchdog.mjs", "apps/server/native-cli-watchdog.mjs", "packages/contracts/index.js", "dist/web/index.html", "bin/node", "THIRD-PARTY-NOTICES.md", ...supplementalStaged];
+const files = ["apps/server/main.js", "apps/server/data-lease.js", "apps/server/browser-use.js", "apps/server/chrome-path.js", "apps/server/internal-chrome.js", "apps/server/qa-browser-watchdog.mjs", "apps/server/cliproxy-process.js", "apps/server/cliproxy-provision.js", "apps/server/cliproxy-config.mjs", "apps/server/cliproxy-watchdog.mjs", "apps/server/storage-worker.mjs", "apps/server/check-watchdog.mjs", "apps/server/native-cli-watchdog.mjs", "packages/contracts/index.js", "dist/web/index.html", "bin/node", "THIRD-PARTY-NOTICES.md", ...supplementalStaged];
 const hashes = {};
 for (const path of files) {
   const bytes = await readFile(join(stage, path));

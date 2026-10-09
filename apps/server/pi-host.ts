@@ -11,6 +11,8 @@ import { Storage } from "./storage.js";
 import { registerDemoProvider } from "./demo-provider.js";
 import { assertNotIgnored, assertWorkspaceHead, createCodeWorkspace, describeGitRoot, inspectCodePath, inspectWorkspaceSetup, mutationTools, workspaceChanges } from "./editing.js";
 import { credentialGuard, inspectionTools, type PathGuard } from "./tool-boundary.js";
+import { chromeUserDataDir } from "./chrome-path.js";
+import { BROWSER_TOOLS, BrowserUse, isBrowserTool } from "./browser-use.js";
 import { isQaTool, qaReviewTools, qaTools, QA_REVIEW_TOOLS, QA_TOOLS, type Qa } from "./qa-runs.js";
 import { sweepCrashTemps } from "./crash-temps.js";
 import { formatShellResult, killAllShells, protectedRoots, runShell, sandboxAvailable, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } from "./shell-tool.js";
@@ -157,17 +159,19 @@ export class PiHost {
   private graphUserReceipts=new Set<string>();
   private deltas=new Map<string,{parts:string[];timer:ReturnType<typeof setTimeout>}>();
   private qa?:Qa;
+  private browserUse?:BrowserUse;
   private closing=false;
   private closeWork?:Promise<void>;
   private background=new Set<Promise<unknown>>();
   private backgroundFailure=false;
   private bashExits=new Map<string,string>();
   private protectPath:PathGuard=()=>{throw new Error("Credential guard unavailable");};
-  constructor(private storage:Storage,private dataDir:string,private send:Send){}
+  constructor(private storage:Storage,private dataDir:string,private send:Send,private shellControlPlanePorts:readonly number[]=[]){ }
   /** Enables QA tool registration for role "qa" sessions that start while a user-approved run is active. */
   attachQa(qa:Qa){this.qa=qa;}
+  attachBrowserUse(browserUse:BrowserUse){this.browserUse=browserUse;}
   private track(work:Promise<unknown>){this.background.add(work);void work.then(()=>{this.background.delete(work);},()=>{this.background.delete(work);this.backgroundFailure=true;});}
-  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"agent"),getAgentDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
+  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"browser-use"),join(this.dataDir,"agent"),getAgentDir(),chromeUserDataDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
   private async availableModels(){
     // SDK auth checks can throw errors containing credentials, even for an
     // unrelated provider with no models. Every availability consumer is fenced.
@@ -351,6 +355,7 @@ export class PiHost {
     const profile=row.policy?.effective.profile??READ_ONLY_PROFILE;
     // Shell access: root sessions that can write, and every delegated agent. Never the unsupervised AGY route, multi-repo coordinators (no tools) or the independent revision reviewer.
     const bashEnabled=!unsupervised&&!qaReviewer&&profile.tools.length>0&&(!!row.parentId||(profile.tools as readonly string[]).includes("write"));
+    const browserToolsEnabled=!!this.browserUse&&row.id===context.root.id&&row.role==="root"&&!row.parentId&&!unsupervised&&profile.tools.length>0;
     const task=row.policy?.requested.mode==="multi"&&row.policy.task?await this.storage.call<ProjectTaskView|undefined>("projectTask",{id:row.policy.task.id}):undefined;
     const settings=SettingsManager.inMemory();
     const loader=new DefaultResourceLoader({cwd:row.cwd,agentDir:join(this.dataDir,"agent"),settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,appendSystemPrompt:canDelegate&&!row.parentId?[ORCHESTRATOR_PROMPT]:[],extensionFactories:[{
@@ -366,6 +371,7 @@ export class PiHost {
       if(bashEnabled)pi.registerTool(this.bashTool(row));
       if(qaEnabled)for(const tool of qaTools(this.qa!,{rootId:context.root.id,agentId:row.id,approve:async preview=>!!await this.requestApproval(row,"qa_action",preview)}))pi.registerTool(tool);
       if(qaReviewer)for(const tool of qaReviewTools(this.qa!,{rootId:context.root.id,reviewId:row.id,images:!!this.model(row.model)?.input?.includes("image")}))pi.registerTool(tool);
+      if(browserToolsEnabled&&this.browserUse)for(const tool of this.browserUse.tools(row.id,()=>!!this.model(row.model)?.input?.includes("image"),async preview=>!!await this.requestApproval(row,"browser_action",preview)))pi.registerTool(tool);
       if(this.commitTool(row))pi.registerTool(defineTool({
         name:"git_commit",label:"Commit changes",
         description:"Commit all current working-tree changes in the selected folder with the given message. Write a concise message: a short imperative subject line (max 72 characters), optionally a blank line and a brief body. Call this tool directly when asked to commit; do not ask for confirmation in chat first. The tool itself presents the exact message and diff to the user for approval (or runs directly when the user has granted full access), so a separate chat confirmation only adds a redundant step. Repository hooks do not run.",
@@ -476,6 +482,10 @@ export class PiHost {
           if(qaReviewer)return;
           return {block:true,reason:"QA artifact viewing is limited to the independent revision reviewer"};
         }
+        if(isBrowserTool(event.toolName)){
+          if(browserToolsEnabled&&this.browserUse?.hasSelectedTarget(row.id)&&!!this.model(row.model)?.input?.includes("image"))return;
+          return {block:true,reason:"Chrome tools require an image-capable model, an active supervised root session, and an explicitly selected Chrome tab"};
+        }
         if(!(profile.tools as readonly string[]).includes(event.toolName))return {block:true,reason:"Tool disabled in this session profile"};
         // All enabled file tools own their approval and actual filesystem boundary.
         if(["read","ls","edit","write"].includes(event.toolName))return;
@@ -492,6 +502,7 @@ export class PiHost {
     const toolNames=task?[...profile.tools,"delegate_repo","repo_status"]:canDelegate?[...profile.tools,"delegate"]:[...profile.tools];
     if(this.commitTool(row))toolNames.push("git_commit");
     if(bashEnabled)toolNames.push("bash");
+    if(browserToolsEnabled)toolNames.push(...BROWSER_TOOLS);
     if(qaEnabled)toolNames.push(...QA_TOOLS);
     if(qaReviewer)toolNames.push(...QA_REVIEW_TOOLS);
     const {session,modelFallbackMessage}=await createAgentSession({cwd:row.cwd,model:selected,modelRuntime:this.runtime!,sessionManager:manager,settingsManager:settings,resourceLoader:loader,tools:toolNames,thinkingLevel});
@@ -564,7 +575,7 @@ export class PiHost {
   private bashTool(row:RecordRow){
     return defineTool({
       name:"bash",label:"Run command",
-      description:`Run a shell command on the user's computer with /bin/zsh -lc, in this agent's own folder (${row.cwd}). Use it for tests, builds, linters, git, package managers and other project tooling. Output is stdout and stderr combined (only the last ~30 KB is kept); a non-zero exit code is reported as an error. Commands run with the user's permissions, with network access, but Sigma's own credential and data folders are blocked. Default timeout ${DEFAULT_TIMEOUT_SECONDS}s, at most ${MAX_TIMEOUT_SECONDS}s; the command and everything it started are killed on timeout or when the run is stopped. Commands cannot ask for input. Prefer the edit and write tools for changing files.`,
+      description:`Run a shell command on the user's computer with /bin/zsh -lc, in this agent's own folder (${row.cwd}). Use it for tests, builds, linters, git, package managers and other project tooling. Output is stdout and stderr combined (only the last ~30 KB is kept); a non-zero exit code is reported as an error. Commands run with the user's permissions and ordinary network access. Sigma's credential and data folders and its local control-plane ports are blocked. Default timeout ${DEFAULT_TIMEOUT_SECONDS}s, at most ${MAX_TIMEOUT_SECONDS}s; the command and everything it started are killed on timeout or when the run is stopped. Commands cannot ask for input. Prefer the edit and write tools for changing files.`,
       parameters:Type.Object({command:Type.String({minLength:1,maxLength:8000}),timeoutSeconds:Type.Optional(Type.Number({minimum:1,maximum:MAX_TIMEOUT_SECONDS}))}),
       execute:async(toolCallId,params,signal)=>{
         if(!sandboxAvailable())throw new Error("The bash tool needs macOS sandbox-exec to protect Sigma's credentials; it is unavailable, so no command was run.");
@@ -575,7 +586,7 @@ export class PiHost {
           const approved=await this.requestApproval(row,"bash",`bash ${params.command}`,undefined,`pi-tool:${row.id}:${toolCallId}`);
           if(!approved){denied=true;throw new Error("Command denied or approval unavailable");}
           if(signal?.aborted||this.isStopping(row))throw new Error("Agent stopped");
-          const result=await runShell({command:params.command,cwd:row.cwd,timeoutMs:timeoutSeconds*1000,signal,denied:protectedRoots(this.dataDir,getAgentDir())});
+          const result=await runShell({command:params.command,cwd:row.cwd,timeoutMs:timeoutSeconds*1000,signal,denied:protectedRoots(this.dataDir,getAgentDir(),undefined,undefined,this.shellControlPlanePorts)});
           const text=formatShellResult(result,timeoutSeconds),label=result.timedOut?"timed out":result.aborted?"stopped":`exit ${result.exitCode??result.signal}`;
           this.bashExits.set(toolCallId,label);
           if(result.exitCode!==0||result.timedOut||result.aborted)throw new Error(text);
@@ -1194,7 +1205,7 @@ export class PiHost {
   // Establish the fence synchronously, before API cancellation can wait on checks or reviews.
   stopFence(id:string){
     if(this.stopping.has(id))throw new Error("Session stop is already in progress");
-    this.stopping.add(id);for(const admission of this.promptAdmissions)if(admission.id===id||admission.unresolvedOwner)admission.cancelled=true;return ()=>this.stopping.delete(id);
+    this.stopping.add(id);this.browserUse?.revoke(id);for(const admission of this.promptAdmissions)if(admission.id===id||admission.unresolvedOwner)admission.cancelled=true;return ()=>this.stopping.delete(id);
   }
   private async abortTree(id:string){
     const members=await this.storage.call<Array<{id:string}>>("agents",{rootId:id});

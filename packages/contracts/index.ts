@@ -77,6 +77,14 @@ export interface QaRunView {id:string;sessionId:string;revision:string;current:b
 export interface QaActionView {id:string;runId:string;sessionId:string;agentId:string;seq:number;kind:QaActionKind;target:string;text?:string;revision:string;manifestHash:string;observationId:string|null;actionHash:string;status:QaActionStatus;detail:string;outcome?:"pass"|"fail";artifactId?:string;createdAt:number;endedAt:number|null;}
 export interface QaArtifactView {id:string;runId:string;sessionId:string;mime:"image/png";width:number;height:number;sha256:string;bytes:number;revision:string;manifestHash:string;viewport:QaViewport;observationId:string;createdAt:number;}
 export interface QaView {runs:QaRunView[];actions:QaActionView[];artifacts:QaArtifactView[];}
+export type BrowserUseActionKind="screenshot"|"click"|"type"|"scroll"|"key"|"navigate";
+export type BrowserUseActionStatus="proposed"|"approved"|"dispatched"|"done"|"failed"|"denied"|"cancelled"|"unknown";
+export type BrowserUseMode="chrome"|"internal";
+export interface BrowserModeCommandView {id:string;mode:BrowserUseMode;status:string;createdAt:number;}
+export interface BrowserUseTargetView {id:string;label:string;host:string;origin:string;}
+export interface BrowserUseActionView {id:string;sessionId:string;kind:BrowserUseActionKind;mode?:BrowserUseMode;target:string;status:BrowserUseActionStatus;detail:string;artifactId?:string;observationId?:string;createdAt:number;endedAt:number|null;}
+export interface BrowserUseArtifactView {id:string;sessionId:string;mime:"image/png";width:number;height:number;sha256:string;bytes:number;createdAt:number;}
+export interface BrowserUseView {status:"disconnected"|"connecting"|"connected"|"selected"|"unknown";mode:BrowserUseMode|null;targets:BrowserUseTargetView[];selected:BrowserUseTargetView|null;actions:BrowserUseActionView[];artifacts:BrowserUseArtifactView[];modeCommands:BrowserModeCommandView[];}
 /** Read-only QA finding recorded by a qa agent; `current` only while its revision equals the session's current Code revision. */
 export type QaSeverity="low"|"medium"|"high"|"critical";
 export interface QaFindingView {id:string;runId:string;sessionId:string;agentId:string;revision:string;manifestHash:string;summary:string;severity:QaSeverity;artifactIds:string[];actionIds:string[];current:boolean;createdAt:number;}

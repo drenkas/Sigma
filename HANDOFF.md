@@ -49,6 +49,7 @@ Git, гілка `main`. `.scratch/`, `.data/`, credentials і build artifacts н
 
 ## Операційні нотатки
 
+- **ZENTAB**: [режими й доказова межа](docs/ZENTAB.md). Full serial `npm run check` — 178/178, `npm run build` пройшов. Попередні збої були в тестах: Keychain-затримка свіжого CFT-профілю (тепер `--use-mock-keychain` для синтетичних профілів, справжній HOME для Internal Chrome) і застарілий observationId. CFT-тест підтверджує redirect/approval/screenshot guard. Особистий Chrome, external live vision і native Tauri не перевіряли.
 - **Міграція**: `npm run migrate:preview|stage|status` (див. [docs/FEATURES.md](docs/FEATURES.md)); публікація лише при старті з `SIGMA_MIGRATE_PUBLISH=<stageId>` під lease. Реальний імпорт `.data` → native app data вже виконано з дозволу користувача (stage root `<dest>-migration/`; `state.sqlite.pre-migration` — старий порожній DB, `.data` не змінювалась). Нові імпорти — лише з окремим дозволом.
 - **QA Chromium**: `SIGMA_QA_CHROMIUM` — шлях до Chrome for Testing (sha256 виконуваного файлу записується); артефакти QA — `<DATA_DIR>/qa/<runId>/artifacts/`. Chromium працює під зовнішнім `sandbox-exec` з `--no-sandbox`.
 - **AGY live-probe** (agy 1.2.17): unsupervised route потребує default agent (без `--agent`); кастомні агенти обмежують tools; protocol — stream-json, `step_update.tool_info`. Профіль `DATA_DIR/antigravity-profile` перемикається strict↔unsupervised; стан opt-in — `native-providers.json`. Повторний login не потрібен. Supervised direct AGY — BLOCKED.

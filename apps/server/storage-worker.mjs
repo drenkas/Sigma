@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS qa_artifacts(id TEXT PRIMARY KEY, session_id TEXT NOT
 CREATE TABLE IF NOT EXISTS qa_findings(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS qa_views(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS qa_gates(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS browser_actions(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS browser_artifacts(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id,seq);
 UPDATE sessions SET status='interrupted' WHERE status='running';
 UPDATE approvals SET status='expired' WHERE status='pending';`);
@@ -38,6 +40,7 @@ if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="archived_a
 if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="manager_id"))db.exec("ALTER TABLE sessions ADD COLUMN manager_id TEXT");
 if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="dispatch_started"))db.exec("ALTER TABLE sessions ADD COLUMN dispatch_started INTEGER NOT NULL DEFAULT 0");
 if(!db.prepare("PRAGMA table_info(projects)").all().some(x=>x.name==="archived_at"))db.exec("ALTER TABLE projects ADD COLUMN archived_at INTEGER");
+if(!db.prepare("PRAGMA table_info(browser_actions)").all().some(x=>x.name==="request_hash"))db.exec("ALTER TABLE browser_actions ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''");
 db.exec("UPDATE sessions SET status='interrupted' WHERE parent_id IS NOT NULL AND status='idle'");
 if(!db.prepare("PRAGMA table_info(commands)").all().some(x=>x.name==="request_hash"))db.exec("ALTER TABLE commands ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''");
 if(!db.prepare("PRAGMA table_info(commands)").all().some(x=>x.name==="input_text"))db.exec("ALTER TABLE commands ADD COLUMN input_text TEXT");
@@ -57,6 +60,11 @@ for(const row of db.prepare("SELECT c.id,c.session_id AS sessionId,s.policy FROM
   }
 }
 db.exec("UPDATE checks SET status='expired' WHERE status='pending'; UPDATE checks SET status='unknown' WHERE status IN ('approved','running'); UPDATE reviews SET status='unknown' WHERE status='running'");
+// The Chrome socket/grant is process-local. Never resume a proposed or dispatched action after restart.
+for(const row of db.prepare("SELECT id,status,data FROM browser_actions WHERE status IN ('proposed','approved','dispatched')").all()){
+  const status=row.status==='dispatched'?'unknown':'cancelled';
+  db.prepare("UPDATE browser_actions SET status=?,data=? WHERE id=?").run(status,JSON.stringify({...JSON.parse(row.data),status,endedAt:Date.now(),detail:status==='unknown'?'Server stopped after dispatch; outcome unknown and never replayed':'Server stopped before dispatch; nothing was sent'}),row.id);
+}
 // QA: the browser group died with the server. A dispatched action may or may not have had an effect: unknown, never replayed. Undispatched actions provably did nothing.
 for(const row of db.prepare("SELECT id,status,data FROM qa_runs WHERE status IN ('starting','running')").all())db.prepare("UPDATE qa_runs SET status='unknown',data=? WHERE id=?").run(JSON.stringify({...JSON.parse(row.data),status:'unknown',endedAt:Date.now(),error:'Server stopped while the QA run was active; start a new run'}),row.id);
 for(const row of db.prepare("SELECT id,status,data FROM qa_actions WHERE status IN ('proposed','approved','dispatched')").all()){
@@ -243,6 +251,14 @@ const queries = {
   qaRuns: ({sessionId}) => evidenceList("qa_runs",sessionId),
   qaActiveRun: ({sessionId}) => db.prepare("SELECT status,data FROM qa_runs WHERE session_id=? AND status IN ('starting','running') ORDER BY rowid DESC LIMIT 1").all(sessionId).map(row=>({...JSON.parse(row.data),status:row.status}))[0],
   qaRunTransition: args => transition("qa_runs",args),
+  addBrowserAction: row => {const {requestHash="",...data}=row;return db.prepare("INSERT INTO browser_actions(id,session_id,status,data,request_hash) VALUES(?,?,?,?,?)").run(data.id,data.sessionId,data.status,JSON.stringify(data),requestHash);},
+  browserAction: ({id}) => {const row=db.prepare("SELECT status,data,request_hash AS requestHash FROM browser_actions WHERE id=?").get(id);return row?{...JSON.parse(row.data),status:row.status,requestHash:row.requestHash}:undefined;},
+  browserActions: ({sessionId}) => db.prepare("SELECT status,data FROM browser_actions WHERE session_id=? ORDER BY rowid DESC LIMIT 100").all(sessionId).map(row=>({...JSON.parse(row.data),status:row.status})).reverse(),
+  browserActionTransition: args => transition("browser_actions",args),
+  browserModeCommands: ({sessionId}) => db.prepare("SELECT id,status,behavior,created_at AS createdAt FROM commands WHERE session_id=? AND kind='browser_mode' ORDER BY rowid DESC LIMIT 20").all(sessionId).map(row=>({id:row.id,mode:row.behavior,status:row.status,createdAt:row.createdAt})).reverse(),
+  addBrowserArtifact: row => db.prepare("INSERT INTO browser_artifacts(id,session_id,status,data) VALUES(?,?,?,?)").run(row.id,row.sessionId,"stored",JSON.stringify(row)),
+  browserArtifact: ({id}) => evidence("browser_artifacts",id),
+  browserArtifacts: ({sessionId}) => db.prepare("SELECT data FROM browser_artifacts WHERE session_id=? ORDER BY rowid DESC LIMIT 100").all(sessionId).map(row=>JSON.parse(row.data)).reverse(),
   addQaAction: row => db.prepare("INSERT INTO qa_actions(id,session_id,status,data) VALUES(?,?,?,?)").run(row.id,row.sessionId,row.status,JSON.stringify(row)),
   qaAction: ({id}) => evidence("qa_actions",id),
   qaActions: ({runId}) => db.prepare("SELECT status,data FROM qa_actions WHERE json_extract(data,'$.runId')=? ORDER BY rowid ASC").all(runId).map(row=>({...JSON.parse(row.data),status:row.status})),
