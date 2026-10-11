@@ -170,7 +170,7 @@ The same for both options.
 6. **Stop** interrupts the response.
 7. Sessions remain in **Sessions** after a restart.
 
-**Images.** Attach up to 4 images (PNG, JPEG, GIF, WebP) to a message with the paperclip button, by pasting from the clipboard, or by dragging them onto the composer. Large images are downscaled in the browser first (longest side 2000 px, about 3.5 MB). Only models that accept images allow attachments (OpenAI models and the Claude Code CLI models do; the composer says so when the selected model cannot read images). Images are sent with the prompt and are not stored by Sigma outside the Pi history.
+**Images.** Attach up to 4 images (PNG, JPEG, GIF, WebP) to a message with the paperclip button, by pasting from the clipboard, or by dragging them onto the composer. Large images are downscaled in the browser first (longest side 2000 px, about 3.5 MB). Only models that accept images allow attachments (OpenAI models, the Claude Code CLI models and the unsupervised Antigravity route do; the composer says so when the selected model cannot read images). Images are sent with the prompt and are not stored by Sigma outside the Pi history. The unsupervised Antigravity route receives them as temporary files outside the workspace (AGY opens them with `view_file`), deleted when the turn ends.
 
 **Chats without a project.** Click **+** next to **Chats** in the sidebar (or send from an empty composer with no folder chosen) to start a chat without a project. Sigma creates a fresh scratch folder `~/Documents/Sigma/<YYYY-MM-DD>/<short slug>` (a Git repository with one empty commit, so editing mode works) and runs the session there; the chat is listed under **Chats**. The root can be changed with `SIGMA_SCRATCH_ROOT`.
 

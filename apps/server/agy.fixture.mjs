@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Synthetic stand-in for the Antigravity CLI. Never contacts a model. Placeholders are replaced by the test when it is installed.
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 const scenario=JSON.parse(readFileSync('__SCENARIO__','utf8')),mode=scenario.mode,observed='__OBSERVED__';
@@ -25,6 +25,8 @@ function decode(line){
 if(mode==='hang-start')hang();
 else createInterface({input:process.stdin}).on('line',line=>{
   record({stdin:line});const bad=decode(line);
+  // Images arrive as files in an --add-dir directory: record what AGY could read while it runs.
+  const addIndex=process.argv.indexOf('--add-dir');if(addIndex>=0){const dir=process.argv[addIndex+1];try{record({addDir:dir,dirMode:statSync(dir).mode&0o777,files:readdirSync(dir).sort().map(name=>({name,mode:statSync(dir+'/'+name).mode&0o777,base64:readFileSync(dir+'/'+name).toString('base64')}))});}catch(error){record({addDir:dir,error:String(error)});}}
   if(bad){send({event:'result',result:{conversation_id:CID,status:'ERROR',error:bad,duration_seconds:0.01,num_turns:0,usage:{}}});return;}
   // Verbatim capture of a real agy 1.2.17 turn.
   if(mode==='replay'){process.stdout.write(readFileSync(scenario.replay,'utf8'));return;}

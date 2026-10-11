@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -107,6 +107,41 @@ test('AGY runs with the exact argv, minimal env and private profile; activity is
     assert.equal((await f.host.snapshot(id)).status,'error','AGY ERROR result ends the Pi turn as an error');
     await waitFor(async()=>f.sent.some(event=>event.type==='error'&&event.payload.message==='Antigravity unsupervised request failed (agy_error): model quota exhausted')?true:undefined);
   }finally{await f.close();for(const key of ['OPENAI_API_KEY','SIGMA_SESSION_TOKEN','AGY_ACCESS_TOKEN'])delete process.env[key];}
+});
+
+test('images are handed to AGY as temporary files via --add-dir for that turn only and removed afterwards; text-only turns keep the exact argv',async()=>{
+  await mode('normal');const f=await setup('images');
+  try{
+    await f.host.nativeProviders.enableAgyUnsupervised(true);
+    assert.equal((await modelsOf(f.host))[0].images,true);
+    const id=await f.host.create(f.source,KEY,undefined,'code',{workspaceMode:'worktree'}),png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==','base64'),gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64');
+    await f.host.prompt(id,'what is in these?',undefined,undefined,undefined,undefined,undefined,[{type:'image',data:png.toString('base64'),mimeType:'image/png'},{type:'image',data:gif.toString('base64'),mimeType:'image/gif'}]);
+    await waitFor(async()=>(await f.host.snapshot(id)).status==='settled'?true:undefined);
+    const rows=await observed(),start=rows.find(row=>row.argv)!,stdin=rows.find(row=>row.stdin)!,seen=rows.find(row=>row.addDir)!;
+    const at=start.argv.indexOf('--add-dir');assert.ok(at>0);assert.deepEqual(start.argv,[...AGY_ARGV,'--add-dir',start.argv[at+1]]);
+    const dir=start.argv[at+1];assert.ok(isAbsolute(dir));assert.equal(seen.addDir,dir);assert.equal(seen.error,undefined);assert.equal(seen.dirMode,0o700);
+    assert.ok(!dir.startsWith(await realpath(f.source))&&!dir.startsWith(await realpath((await f.host.snapshot(id)).policy!.effective.cwd)),'Images live outside the git workspace');
+    assert.deepEqual(seen.files.map((file:any)=>[file.name,file.mode,file.base64]),[['image-1.png',0o600,png.toString('base64')],['image-2.gif',0o600,gif.toString('base64')]],'Files existed with the right bytes while AGY ran');
+    const text=JSON.parse(stdin.stdin).message.text;
+    assert.ok(text.includes(`[image 1: ${join(dir,'image-1.png')} — open it with view_file to see it]`)&&text.includes(`[image 2: ${join(dir,'image-2.gif')} — open it with view_file to see it]`));assert.match(text,/\[user\] what is in these\?\n\[image 1:/);
+    await waitFor(async()=>{try{await stat(dir);return undefined;}catch{return true;}});
+    // A session without any image keeps the exact argv and gets no --add-dir. (Images stay in the Pi history, so later turns of the same session re-attach them.)
+    const other=await f.host.create(f.source,KEY,undefined,'code',{workspaceMode:'worktree'});await mode('normal');await f.host.prompt(other,'thanks');await waitFor(async()=>(await observed()).some(row=>row.stdin)?true:undefined);await waitFor(async()=>(await f.host.snapshot(other)).status==='settled'?true:undefined);
+    const plain=await observed();assert.deepEqual(plain.find(row=>row.argv)!.argv,AGY_ARGV);assert.ok(!plain.some(row=>row.addDir));assert.ok(!JSON.parse(plain.find(row=>row.stdin)!.stdin).message.text.includes('[image'));
+  }finally{await f.close();}
+});
+
+test('an image-only message is kept in the transcript and the image directory is removed when the turn fails',async()=>{
+  await mode('error');const f=await setup('images-error');
+  try{
+    await f.host.nativeProviders.enableAgyUnsupervised(true);
+    const id=await f.host.create(f.source,KEY,undefined,'code',{workspaceMode:'worktree'});
+    await f.host.prompt(id,'',undefined,undefined,undefined,undefined,undefined,[{type:'image',data:Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64').toString('base64'),mimeType:'image/gif'}]);
+    await waitFor(async()=>(await f.host.snapshot(id)).status==='error'?true:undefined);
+    const rows=await observed(),start=rows.find(row=>row.argv)!,dir=start.argv[start.argv.indexOf('--add-dir')+1],text=JSON.parse(rows.find(row=>row.stdin)!.stdin).message.text;
+    assert.match(text,/\[user\] \[image 1: .*image-1\.gif — open it with view_file to see it\]/);
+    await waitFor(async()=>{try{await stat(dir);return undefined;}catch{return true;}});
+  }finally{await f.close();}
 });
 
 test('replaying a verbatim live agy 1.2.17 capture yields its final text and the manage_task activity',async()=>{

@@ -1,4 +1,7 @@
 import { realpathSync } from 'node:fs';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createAssistantMessageEventStream, normalizeContext, type AssistantMessage, type Model, type Provider, type SimpleStreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { AgyActivity } from '../../packages/contracts/index.js';
@@ -15,10 +18,14 @@ const count=(value:any)=>Number.isSafeInteger(value)&&value>=0?value as number:0
 const clip=(value:unknown,max:number)=>{let text:string;try{text=typeof value==='string'?value:JSON.stringify(value)??'';}catch{text='';}text=text.replace(/[\u0000-\u001f\u007f]+/g,' ').trim();return text.length>max?text.slice(0,max-1).replace(/[\uD800-\uDBFF]$/,'')+'…':text;};
 /** Real agy 1.2.17 stdin: one `{"event":"user","message":{...}}` line per turn; text/content/prompt are all accepted so all are set. */
 export const agyInputLine=(text:string)=>({event:'user',message:{text,content:text,prompt:text}});
-function transcript(context:TranscriptContext){
-  const lines:string[]=[];
+const IMAGE_EXT:Record<string,string>={'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp'};
+const isImage=(part:any)=>part?.type==='image'&&typeof part.data==='string';
+/** Images of user messages in transcript order; they reach AGY as temporary files it opens with view_file. */
+const imagesOf=(context:TranscriptContext)=>(context.messages as any[]).flatMap(message=>message.role==='user'&&Array.isArray(message.content)?message.content.filter(isImage):[]);
+function transcript(context:TranscriptContext,paths:string[]=[]){
+  const lines:string[]=[];let next=0;
   for(const message of context.messages as any[]){
-    const parts=typeof message.content==='string'?[message.content]:Array.isArray(message.content)?message.content.filter((part:any)=>part?.type==='text'&&typeof part.text==='string').map((part:any)=>part.text):[];
+    const parts=(typeof message.content==='string'?[message.content]:Array.isArray(message.content)?message.content:[]).map((part:any)=>typeof part==='string'?part:part?.type==='text'&&typeof part.text==='string'?part.text:message.role==='user'&&isImage(part)&&paths[next]?`[image ${next+1}: ${paths[next++]} — open it with view_file to see it]`:undefined).filter((part:string|undefined)=>part!==undefined);
     const text=parts.join('\n').trim();if(text&&(message.role==='user'||message.role==='assistant'))lines.push(`[${message.role}] ${text}`);
   }
   let body=lines.join('\n\n');if(body.length>MAX_PROMPT)body=body.slice(body.length-MAX_PROMPT);
@@ -27,20 +34,23 @@ function transcript(context:TranscriptContext){
 export type AgySession={cwd:string;check:()=>void;activity:(record:Omit<AgyActivity,'agentId'>)=>void};
 
 export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:NativeCli){
-  const model:Model<typeof API>={provider:AGY_UNSUPERVISED_PROVIDER_ID,api:API,id:MODEL,name:'Antigravity · unsupervised (AGY runs its own tools)',baseUrl:'',reasoning:false,input:['text'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
+  const model:Model<typeof API>={provider:AGY_UNSUPERVISED_PROVIDER_ID,api:API,id:MODEL,name:'Antigravity · unsupervised (AGY runs its own tools)',baseUrl:'',reasoning:false,input:['text','image'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
   const sessions=new Map<string,AgySession>();
   const identity=(selected?:Model<any>)=>runtime.getProvider(AGY_UNSUPERVISED_PROVIDER_ID)===provider&&runtime.getRegisteredNativeProvider(AGY_UNSUPERVISED_PROVIDER_ID)===provider&&(!selected||selected.provider===AGY_UNSUPERVISED_PROVIDER_ID&&selected.api===API&&selected.id===MODEL);
   function stream(selected:Model<any>,context:TranscriptContext,options?:SimpleStreamOptions){
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
     const operation=new AbortController(),abort=()=>operation.abort();options?.signal?.addEventListener('abort',abort,{once:true});if(options?.signal?.aborted)operation.abort();
     void (async()=>{
-      let failure='provider_configuration',full='',emitted='',terminal:any,agyError='',finishTimer:ReturnType<typeof setTimeout>|undefined,steps=0;const records=new Map<string,Omit<AgyActivity,'agentId'>>(),local=new AbortController();
+      let failure='provider_configuration',full='',emitted='',terminal:any,agyError='',imageDir:string|undefined,finishTimer:ReturnType<typeof setTimeout>|undefined,steps=0;const records=new Map<string,Omit<AgyActivity,'agentId'>>(),local=new AbortController();
       const emit=(final:boolean)=>{let stable=full;if(!final&&/[\uD800-\uDBFF]$/.test(stable))stable=stable.slice(0,-1);if(!stable.startsWith(emitted)||stable.length===emitted.length)return;const delta=stable.slice(emitted.length);if(!output.content.length){output.content.push({type:'text',text:''});events.push({type:'text_start',contentIndex:0,partial:output});}emitted=stable;(output.content[0] as {text:string}).text=emitted;events.push({type:'text_delta',contentIndex:0,delta,partial:output});};
       try{
         const session=options?.sessionId?sessions.get(options.sessionId):undefined;
         if(!identity(selected)||!owner.isAgyUnsupervisedEnabled()||options?.apiKey||!session)throw new Error('Unsupervised route is not enabled for this session');
         session.check();if(realpathSync(session.cwd)!==session.cwd)throw new Error('Workspace location changed');
-        const prompt=transcript(context);operation.signal.throwIfAborted();events.push({type:'start',partial:output});failure='transport';
+        // Images go to a private temp dir outside the git workspace, handed to AGY with --add-dir for this turn only and removed in `finally`.
+        const images=imagesOf(context);let paths:string[]=[];
+        if(images.length){const made=await mkdtemp(join(tmpdir(),'sigma-agy-images-'));imageDir=made;const dir=await realpath(made);imageDir=dir;paths=await Promise.all(images.map(async(image:any,index:number)=>{const path=join(dir,`image-${index+1}.${IMAGE_EXT[image.mimeType]??'png'}`);await writeFile(path,Buffer.from(image.data,'base64'),{mode:0o600});return path;}));}
+        const prompt=transcript(context,paths);operation.signal.throwIfAborted();events.push({type:'start',partial:output});failure='transport';
         const record=(step:any)=>{
           const info=object(step.tool_info)?step.tool_info:{},name=clip(step.tool_name??info.name??'tool',80),key=clip(step.step_index??`${name}:${steps}`,80);
           const state=String(step.state??'').toUpperCase(),failed=state==='ERROR'||state==='FAILED'||state==='CANCELLED'||!!info.error;
@@ -50,7 +60,7 @@ export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:Nativ
           if(before&&before.tool===next.tool&&before.params===next.params&&before.status===next.status&&before.output===next.output)return;
           records.set(key,next);session.activity(next);
         };
-        const result=await owner.run({agy:{cwd:session.cwd},signal:AbortSignal.any([operation.signal,local.signal]),timeoutMs:Math.min(options?.timeoutMs??1_800_000,3_600_000),prepare:async()=>AGY_ARGV,onStart:send=>send(agyInputLine(prompt)),onLine:(line,send)=>{
+        const result=await owner.run({agy:{cwd:session.cwd},signal:AbortSignal.any([operation.signal,local.signal]),timeoutMs:Math.min(options?.timeoutMs??1_800_000,3_600_000),prepare:async()=>imageDir?[...AGY_ARGV,'--add-dir',imageDir]:AGY_ARGV,onStart:send=>send(agyInputLine(prompt)),onLine:(line,send)=>{
           if(!line.trim())return;failure='native_protocol';const event=JSON.parse(line);if(!object(event)||terminal)throw new Error('Unexpected AGY event');
           if(event.event==='init')return;
           if(event.event==='step_update'){
@@ -72,7 +82,7 @@ export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:Nativ
         emit(true);if(output.content[0]?.type==='text')events.push({type:'text_end',contentIndex:0,content:full,partial:output});
         output.stopReason='stop';events.push({type:'done',reason:'stop',message:output});
       }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Antigravity request cancelled':`Antigravity unsupervised request failed (${failure})${agyError?`: ${agyError}`:''}`;events.push({type:'error',reason:output.stopReason,error:output});}
-      finally{if(finishTimer)clearTimeout(finishTimer);options?.signal?.removeEventListener('abort',abort);events.end();}
+      finally{if(finishTimer)clearTimeout(finishTimer);if(imageDir)await rm(imageDir,{recursive:true,force:true}).catch(()=>{});options?.signal?.removeEventListener('abort',abort);events.end();}
     })();return events;
   }
   const deny=async({credential}:{credential?:unknown})=>{if(credential)throw new Error('Native routes do not accept Pi credentials');return identity()&&owner.isAgyUnsupervisedEnabled()?{source:'unsupervised Antigravity profile'}:undefined;};
