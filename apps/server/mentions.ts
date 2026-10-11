@@ -55,12 +55,15 @@ export async function listFiles(cwd:string,deny:string[]=[]):Promise<MentionFile
   cache.set(key,{at:Date.now(),files:all});
   return all;
 }
+/** 0 exact name, 1 name prefix, 2 name substring, 3 path only, -1 no match. */
+const matchRank=(base:string,path:string,q:string)=>base===q?0:base.startsWith(q)?1:base.includes(q)?2:path.includes(q)?3:-1;
+const fileQuery=(query:string)=>query.toLowerCase().replace(/\/+$/,"");
 export function searchFiles(files:MentionFile[],query:string,limit=50):MentionFile[]{
-  const q=query.toLowerCase().replace(/\/+$/,"");
+  const q=fileQuery(query);
   if(!q)return [...files].sort((a,b)=>a.path.split("/").length-b.path.split("/").length||a.path.localeCompare(b.path)).slice(0,limit);
   const ranked:Array<{file:MentionFile;rank:number}>=[];
   for(const file of files){
-    const path=file.path.toLowerCase(),base=basename(path),rank=base.startsWith(q)?0:base.includes(q)?1:path.includes(q)?2:-1;
+    const path=file.path.toLowerCase(),rank=matchRank(basename(path),path,q);
     if(rank>=0)ranked.push({file,rank});
   }
   return ranked.sort((a,b)=>a.rank-b.rank||a.file.path.length-b.file.path.length||a.file.path.localeCompare(b.file.path)).slice(0,limit).map(item=>item.file);
@@ -106,12 +109,18 @@ export function parseMentions(text:string):MentionToken[]{
 }
 const escapeBlock=(text:string)=>text.replace(/<(\/?)sigma-mentions>/g,"<$1​sigma-mentions>");
 const attr=(text:string)=>text.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+/** Deny roots (and their real paths) that could hold paths inside the folder; roots that contain the folder itself never block it. */
+async function denyRoots(rootReal:string,deny:string[]){
+  const out:string[]=[];
+  for(const root of deny){if(inside(root,rootReal))continue;for(const candidate of new Set([root,await canonical(root)]))out.push(candidate);}
+  return out;
+}
 async function resolveFile(cwd:string,rootReal:string,deny:string[],value:string){
   const path=value.replace(/\/+$/,"");
   if(!path||path==="."||path.includes("\0")||isAbsolute(path)||/^[A-Za-z]:/.test(path)||path.split(/[\\/]/).includes(".."))return null;
   const real=await realpath(join(rootReal,path)).catch(()=>null);
   if(!real||!inside(rootReal,real))return null;
-  for(const root of deny){if(inside(root,rootReal))continue;for(const candidate of new Set([root,await canonical(root)]))if(inside(candidate,real))return null;}
+  if((await denyRoots(rootReal,deny)).some(root=>inside(root,real)))return null;
   const info=await stat(real).catch(()=>null);
   return info&&(info.isFile()||info.isDirectory())?{path,real,info}:null;
 }
@@ -178,12 +187,28 @@ export function stripMentionContext(text:string):string{
   return at<0?text:text.slice(0,at);
 }
 const queryKind=(query:string)=>query.startsWith("skill:")?"skill":query.startsWith("tool:")?"tool":"";
-/** Picker results for a query; `skill:` and `tool:` prefixes narrow to that kind. */
+const MAX_RESULTS=50,MAX_CHECKS=500;
+/** Keeps ranked files whose real path stays inside the folder and outside denied roots; only checks as many as it returns. */
+async function reachable(cwd:string,deny:string[],ranked:MentionFile[]){
+  const root=await realpath(cwd).catch(()=>null);
+  if(!root)return [];
+  const blocked=await denyRoots(root,deny),out:MentionFile[]=[];
+  for(const file of ranked.slice(0,MAX_CHECKS)){
+    if(out.length>=MAX_RESULTS)break;
+    const real=await realpath(join(root,file.path)).catch(()=>null);
+    if(real&&inside(root,real)&&!blocked.some(item=>inside(item,real)))out.push(file);
+  }
+  return out;
+}
+/** Picker results for a query, groups ordered by their best hit (name match beats path-only; ties Skills, Tools, Files). `skill:` and `tool:` prefixes narrow to that kind; a query that is a prefix of them (`sk`, `tool`) lists that kind too. */
 export async function searchMentions(query:string,sources:MentionSources){
   const kind=queryKind(query),q=kind?query.slice(kind.length+1):query,needle=q.toLowerCase();
-  const rank=(item:{name:string})=>item.name.toLowerCase().startsWith(needle)?0:1,pick=<T extends {name:string}>(items:T[])=>items.filter(item=>!needle||item.name.toLowerCase().includes(needle)).sort((a,b)=>rank(a)-rank(b));
-  const files=!kind&&sources.cwd?searchFiles(await listFiles(sources.cwd,sources.deny).catch(()=>[]),q):[];
-  const skills=kind==="tool"?[]:pick(sources.skills??[]).map(({name,description})=>({name,description}));
-  const tools=kind==="skill"?[]:pick(sources.tools??[]);
-  return {files,skills:skills.slice(0,50),tools:tools.slice(0,50)};
+  const pick=<T extends {name:string}>(items:T[],prefix:string)=>items.map(item=>{const name=item.name.toLowerCase(),rank=!needle?1:name===needle?0:name.startsWith(needle)?1:name.includes(needle)?2:!kind&&needle.length>1&&prefix.startsWith(needle)?1:-1;return {item,rank};}).filter(x=>x.rank>=0).sort((a,b)=>a.rank-b.rank);
+  const found=!kind&&sources.cwd?searchFiles(await listFiles(sources.cwd,sources.deny).catch(()=>[]),q,Infinity):[];
+  const safe=sources.cwd?await reachable(sources.cwd,sources.deny??[],found):[];
+  const skillHits=kind==="tool"?[]:pick(sources.skills??[],"skill:"),toolHits=kind==="skill"?[]:pick(sources.tools??[],"tool:");
+  const fq=fileQuery(q),fileRank=safe.length?matchRank(basename(safe[0].path.toLowerCase()),safe[0].path.toLowerCase(),fq):Infinity;
+  const best={skills:skillHits[0]?.rank??Infinity,tools:toolHits[0]?.rank??Infinity,files:fileRank};
+  const order=needle?(["skills","tools","files"] as const).slice().sort((a,b)=>best[a]-best[b]):(["files","skills","tools"] as const).slice();
+  return {order,files:safe,skills:skillHits.slice(0,MAX_RESULTS).map(({item:{name,description}})=>({name,description})),tools:toolHits.slice(0,MAX_RESULTS).map(x=>x.item)};
 }

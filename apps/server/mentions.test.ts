@@ -120,3 +120,38 @@ test("search narrows by kind prefix and filters skills and tools",async()=>{
     assert.ok((await searchMentions("app",sources)).files.some(x=>x.path==="src/app.ts"));
   }finally{await f.done();}
 });
+test("search ranks across kinds by match quality and orders groups by their best hit",async()=>{
+  const f=await fixture();
+  try{
+    await mkdir(join(f.cwd,".claude","skills","haiku-writer"),{recursive:true});await writeFile(join(f.cwd,".claude","skills","haiku-writer","SKILL.md"),"x");await writeFile(join(f.cwd,"notes.md"),"n");await writeFile(join(f.cwd,"docs-read.txt"),"r");
+    const sources={cwd:f.cwd,skills:[{name:"haiku-writer",description:"h",file:"/x"},{name:"poet",description:"writes haiku",file:"/y"}],tools:[{name:"read",description:"r"}]};
+    const haiku=await searchMentions("haiku",sources);
+    assert.deepEqual(haiku.order,["skills","files","tools"]);assert.deepEqual(haiku.skills.map(s=>s.name),["haiku-writer"]);assert.ok(haiku.files.some(x=>x.path===".claude/skills/haiku-writer"));
+    const notes=await searchMentions("notes",sources);assert.equal(notes.order[0],"files");
+    const read=await searchMentions("rea",sources);assert.deepEqual(read.order.slice(0,2),["tools","files"]);
+    assert.deepEqual((await searchMentions("",sources)).order,["files","skills","tools"]);
+  }finally{await f.done();}
+});
+test("a query that is a prefix of skill: or tool: lists that kind",async()=>{
+  const f=await fixture();
+  try{
+    const sources={cwd:f.cwd,skills:[{name:"deploy",description:"d",file:"/x"},{name:"lint",description:"l",file:"/y"}],tools:[{name:"bash",description:"b"}]};
+    for(const q of ["skill","sk"]){const r=await searchMentions(q,sources);assert.deepEqual(r.skills.map(s=>s.name),["deploy","lint"],q);assert.deepEqual(r.tools,[],q);}
+    assert.deepEqual((await searchMentions("tool",sources)).tools,[{name:"bash",description:"b"}]);
+    assert.deepEqual((await searchMentions("s",sources)).skills,[]);
+    assert.deepEqual((await searchMentions("skill:",sources)).skills.map(s=>s.name),["deploy","lint"]);
+  }finally{await f.done();}
+});
+test("search drops entries whose real path leaves the folder or lands in a denied root",async()=>{
+  const f=await fixture();
+  try{
+    execFileSync("git",["init","-q"],{cwd:f.cwd});
+    await symlink(f.outside,join(f.cwd,"out-dir"));await symlink(join(f.outside,"secret.txt"),join(f.cwd,"out-secret.txt"));await symlink(join(f.cwd,"src"),join(f.cwd,"in-src"));await symlink(join(f.cwd,"missing"),join(f.cwd,"out-broken"));
+    await writeFile(join(f.cwd,"out-real.txt"),"y");
+    assert.ok((await listFiles(f.cwd)).some(x=>x.path==="out-secret.txt"));
+    const paths=(await searchMentions("out-",{cwd:f.cwd})).files.map(x=>x.path);
+    assert.deepEqual(paths.sort(),["out-real.txt"]);
+    assert.ok((await searchMentions("in-src",{cwd:f.cwd})).files.some(x=>x.path==="in-src"));
+    assert.deepEqual((await searchMentions("app",{cwd:f.cwd,deny:[join(f.cwd,"src")]})).files,[]);
+  }finally{await f.done();}
+});
