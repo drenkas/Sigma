@@ -11,7 +11,7 @@ const send=value=>process.stdout.write(JSON.stringify(value)+'\n');
 record({pid:process.pid,ppid:process.ppid,cwd:process.cwd(),envKeys:Object.keys(process.env),disableMds:process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS,userOwnerMatches:process.env.USER===scenario.ownerUser,home,kind:process.argv.includes('auth')?'status':'completion'});
 if(process.argv.includes('auth')){
   if(['held-status','held-status-completion'].includes(mode)){writeFileSync(join(home,'status-ready'),String(process.pid));record({statusReady:true,pid:process.pid});setInterval(()=>{},1000);}
-  else {process.stdout.write(JSON.stringify({loggedIn:true,authMethod:'claude.ai',subscriptionType:'pro'},null,2)+'\n');process.exit(0);}
+  else {process.stdout.write(JSON.stringify(mode==='logged-out'?{loggedIn:false}:{loggedIn:true,authMethod:'claude.ai',subscriptionType:'pro'},null,2)+'\n');process.exit(0);}
 }else if(['hang','descendant'].includes(mode)){
   process.on('SIGTERM',()=>{});if(mode==='descendant'){const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:['ignore','ignore','ignore']});record({descendant:child.pid});}
   writeFileSync(join(home,'ready'),String(process.pid));setInterval(()=>{},1000);
@@ -54,8 +54,18 @@ if(process.argv.includes('auth')){
       send({type:'system',subtype:'thinking_tokens',estimated_tokens:57,estimated_tokens_delta:57,session_id:mode==='thinking-session'?randomUUID():nativeSessionId,uuid:randomUUID(),...(mode==='thinking-extra'?{extra:true}:{})});
       send({type:'system',subtype:'thinking_tokens',estimated_tokens:112,estimated_tokens_delta:55,session_id:nativeSessionId,uuid:randomUUID()});
     }
-    send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:mode==='native-action'?'Bash':'StructuredOutput',id:'formatter'}}});
-    const json=JSON.stringify(proposal);for(let at=0;at<json.length;at+=5)send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:json.slice(at,at+5)}}});
+    // The model sometimes calls a Pi tool natively; the CLI answers with an error and the model then continues with StructuredOutput (index 1).
+    const stray=['stray-pi-tool','stray-native-tool','stray-success','stray-unknown-result'].includes(mode),at0=stray?1:0;
+    if(stray){
+      send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'stray1',name:mode==='stray-native-tool'?'Bash':'read',input:{},caller:{type:'direct'}}}});
+      send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"path":"src/index.ts"}'}}});
+      send({type:'assistant',message:{content:[{type:'tool_use',id:'stray1',name:mode==='stray-native-tool'?'Bash':'read',input:{path:'src/index.ts'},caller:{type:'direct'}}]}});
+      send({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:mode==='stray-unknown-result'?'never-started':'stray1',is_error:mode!=='stray-success',content:'<tool_use_error>Error: No such tool available: read</tool_use_error>'}]},parent_tool_use_id:null,session_id:nativeSessionId,uuid:randomUUID(),timestamp:new Date().toISOString()});
+      send({type:'stream_event',event:{type:'content_block_stop',index:0}});
+      send({type:'system',subtype:'status',status:'requesting',session_id:nativeSessionId,uuid:randomUUID()});
+    }
+    send({type:'stream_event',event:{type:'content_block_start',index:at0,content_block:{type:'tool_use',name:mode==='native-action'?'Bash':'StructuredOutput',id:'formatter'}}});
+    const json=JSON.stringify(proposal);for(let at=0;at<json.length;at+=5)send({type:'stream_event',event:{type:'content_block_delta',index:at0,delta:{type:'input_json_delta',partial_json:json.slice(at,at+5)}}});
     send({type:'stream_event',event:{type:'content_block_delta',index:1,delta:{type:'text_delta',text:'Native formatter text must never leak'}}});
     send({type:'assistant',message:{content:[{type:'tool_use',id:'formatter',name:'StructuredOutput',input:proposal}]}});
     send({type:'user',message:{content:[{type:'tool_result',tool_use_id:'formatter',content:'formatted'}]}});

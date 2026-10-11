@@ -63,7 +63,9 @@ export class NativeCli {
   private agyUnsupervised=false;
   private agyHook?:(enabled:boolean)=>void;
   constructor(private dataDir:string){}
-  async init(){try{const saved=JSON.parse(await readFile(join(this.dataDir,'native-providers.json'),'utf8'));this.enabled=saved.claude===true;this.view.enabled=this.enabled;this.agyUnsupervised=saved.agyUnsupervised===true&&!offline();}catch{}if(offline()){this.view.state='blocked';this.view.message='Native providers are disabled in offline or demo mode.';}}
+  async init(){try{const saved=JSON.parse(await readFile(join(this.dataDir,'native-providers.json'),'utf8'));this.enabled=saved.claude===true;this.view.enabled=this.enabled;this.agyUnsupervised=saved.agyUnsupervised===true&&!offline();}catch{}if(offline()){this.view.state='blocked';this.view.message='Native providers are disabled in offline or demo mode.';}
+    // A saved-enabled route is verified once at startup (8 s probe timeout) so it is not left disconnected until the user presses Refresh status.
+    else if(this.enabled)try{await this.control(()=>this.probe(CLAUDE_PROVIDER_ID));}catch{}}
   list():NativeProviderView[]{
     const agyPath=process.env.HOME?join(process.env.HOME,'.local','bin','agy'):undefined;
     const installed=!!agyPath&&(()=>{try{accessSync(agyPath,constants.X_OK);return true;}catch{return false;}})();

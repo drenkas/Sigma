@@ -19,7 +19,7 @@ import { formatShellResult, killAllShells, protectedRoots, runShell, sandboxAvai
 import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch } from "./git-actions.js";
 import { prepareCommit, executeCommit, gitIdentity, dispatchGit, inspectGit, finalizeGit, type GitIntent } from "./git-intents.js";
 import { defaultRoles, normalizeRoles, roleInput, resolveRole } from "./roles.js";
-import { NativeCli, NATIVE_PROVIDER_IDS, AGY_UNSUPERVISED_PROVIDER_ID } from "./native-cli.js";
+import { NativeCli, NATIVE_PROVIDER_IDS, AGY_UNSUPERVISED_PROVIDER_ID, CLAUDE_PROVIDER_ID } from "./native-cli.js";
 import { registerAgyUnsupervisedProvider } from "./agy-provider.js";
 import { registerClaudeProvider } from "./claude-provider.js";
 import { ProviderAuth } from "./provider-auth.js";
@@ -525,8 +525,8 @@ export class PiHost {
         const last=[...session.messages].reverse().find(m=>m.role==="assistant");
         const status=last?.role==="assistant"&&last.stopReason==="error"?"error":last?.role==="assistant"&&last.stopReason==="aborted"?"interrupted":"settled";
         this.track(this.setStatus(row,status));
-        // AGY's clipped, control-stripped result error is the only provider message surfaced; other native errors stay generic.
-        if(status==="error"&&last?.role==="assistant"&&last.provider===AGY_UNSUPERVISED_PROVIDER_ID&&typeof last.errorMessage==="string"&&last.errorMessage.startsWith("Antigravity unsupervised request failed"))this.track(this.send(row.rootId||row.id,"error",{message:last.errorMessage},true));
+        // Only AGY's clipped, control-stripped result error and Claude Code's clipped CLI error (e.g. usage credits required) are surfaced; other native errors stay generic.
+        if(status==="error"&&last?.role==="assistant"&&typeof last.errorMessage==="string"&&(last.provider===AGY_UNSUPERVISED_PROVIDER_ID&&last.errorMessage.startsWith("Antigravity unsupervised request failed")||last.provider===CLAUDE_PROVIDER_ID&&last.errorMessage.startsWith("Claude Code: ")))this.track(this.send(row.rootId||row.id,"error",{message:last.errorMessage},true));
       }
     });
     this.active.set(row.id,{session,row,unsubscribe});
