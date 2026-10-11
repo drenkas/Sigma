@@ -33,12 +33,27 @@ if(process.argv.includes('auth')){
     const last=payload.transcript.at(-1),toolResult=[...payload.transcript].reverse().find(message=>message.role==='toolResult'),user=[...payload.transcript].reverse().find(message=>message.role==='user');
     const input=typeof user?.content==='string'?user.content:user?.content?.filter(part=>part.type==='text').map(part=>part.text).join('')??'';
     const complete=()=>{
-    send({type:'system',subtype:mode==='unknown-system'?'unverified':'init',model,session_id:nativeSessionId,tools:mode==='native-tool'?['Read']:['StructuredOutput'],mcp_servers:[],skills:[],plugins:[{name:'agents-md'},{name:'telemetry'}],slash_commands:[]});
+    send({type:'system',subtype:mode==='unknown-system'?'unverified':'init',model,session_id:nativeSessionId,tools:mode==='native-tool'?['Read']:['StructuredOutput'],mcp_servers:[],skills:[],plugins:mode==='builtin-plugin'?[{name:'agents-md',path:'builtin',source:'agents-md@builtin'},{name:'telemetry',path:'builtin',source:'telemetry@builtin'},{name:'plugin-authoring',path:'builtin',source:'plugin-authoring@builtin'}]:mode==='foreign-plugin'?[{name:'agents-md'},{name:'evil',path:'/tmp/evil',source:'evil@market'}]:[{name:'agents-md'},{name:'telemetry'}],slash_commands:[]});
     const wantsRead=input.startsWith('read:')&&!toolResult;
     const proposal={text:toolResult?(toolResult.isError?'Denied by Pi':'Read by Pi: '+toolResult.content.filter(part=>part.type==='text').map(part=>part.text).join('')):'Hello 🐱',toolCalls:wantsRead?[{name:'read',arguments:{path:input.slice(5).trim()}}]:[]};
     if(mode==='batch-invalid')proposal.toolCalls=[{name:'read',arguments:{path:'note.txt'}},{name:'unavailable',arguments:{}}];
     send({type:'system',subtype:'status',status:mode==='status-unknown'?'unverified':mode==='status-compacting'?'compacting':'requesting',session_id:mode==='status-session'?randomUUID():nativeSessionId,uuid:mode==='status-uuid'?'invalid':randomUUID(),...(mode==='status-extra'?{permissionMode:'dontAsk'}:{})});
     send({type:'system',subtype:'status',status:null,session_id:nativeSessionId,uuid:randomUUID()});
+    if(mode==='api-error'){send({type:'result',subtype:'success',is_error:true,api_error_status:429,api_error_code:'credits_required',result:'Fable 5.1 requires usage credits. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.',session_id:nativeSessionId,uuid:randomUUID()});return;}
+    if(['enforce-retry','enforce-foreign','enforce-not-synthetic'].includes(mode)){
+      send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
+      send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'plain answer'}}});
+      send({type:'assistant',message:{content:[{type:'text',text:'plain answer'}]}});
+      send({type:'user',message:{role:'user',content:[{type:'text',text:(mode==='enforce-foreign'?'[other] ':'[structured-output-enforce] ')+'You MUST call the StructuredOutput tool to complete this request. Call this tool now.'}]},parent_tool_use_id:null,session_id:nativeSessionId,uuid:randomUUID(),timestamp:new Date().toISOString(),...(mode==='enforce-not-synthetic'?{}:{isSynthetic:true})});
+    }
+    if(['thinking','thinking-extra','thinking-session'].includes(mode)){
+      send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}}});
+      send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'Considering the greeting'}}});
+      send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'signature_delta',signature:'c2lnbmF0dXJl'}}});
+      send({type:'stream_event',event:{type:'content_block_stop',index:0}});
+      send({type:'system',subtype:'thinking_tokens',estimated_tokens:57,estimated_tokens_delta:57,session_id:mode==='thinking-session'?randomUUID():nativeSessionId,uuid:randomUUID(),...(mode==='thinking-extra'?{extra:true}:{})});
+      send({type:'system',subtype:'thinking_tokens',estimated_tokens:112,estimated_tokens_delta:55,session_id:nativeSessionId,uuid:randomUUID()});
+    }
     send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:mode==='native-action'?'Bash':'StructuredOutput',id:'formatter'}}});
     const json=JSON.stringify(proposal);for(let at=0;at<json.length;at+=5)send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:json.slice(at,at+5)}}});
     send({type:'stream_event',event:{type:'content_block_delta',index:1,delta:{type:'text_delta',text:'Native formatter text must never leak'}}});

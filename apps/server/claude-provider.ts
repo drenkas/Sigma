@@ -23,7 +23,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
     const operation=new AbortController(),abort=()=>operation.abort();options?.signal?.addEventListener('abort',abort,{once:true});if(options?.signal?.aborted)operation.abort();
     void (async()=>{
-      let terminal:any,init=false,nativeSessionId:string|undefined,structuredIndex:number|undefined,partialJson='',emitted='',pending:{id:string;subtype:string}|undefined,stage=0,failure='transport';const structuredIds=new Set<string>();
+      let terminal:any,init=false,nativeSessionId:string|undefined,structuredIndex:number|undefined,partialJson='',emitted='',pending:{id:string;subtype:string}|undefined,stage=0,broken=false,nativeError='',failure='transport';const structuredIds=new Set<string>();
       const tools=getCurrentTools(context.messages),schema={type:'object',additionalProperties:false,required:['text','toolCalls'],properties:{text:{type:'string'},toolCalls:{type:'array',maxItems:32,...(tools.length?{items:{oneOf:tools.map(tool=>({type:'object',additionalProperties:false,required:['name','arguments'],properties:{name:{const:tool.name},arguments:tool.parameters}}))}}:{maxItems:0,items:false})}}};
       function text(value:unknown){if(typeof value!=='string')return;let stable=value;if(/[\uD800-\uDBFF]$/.test(stable))stable=stable.slice(0,-1);if(!stable.startsWith(emitted))return;const delta=stable.slice(emitted.length);if(!delta)return;if(!output.content.length){output.content.push({type:'text',text:''});events.push({type:'text_start',contentIndex:0,partial:output});}emitted=stable;(output.content[0] as {text:string}).text=emitted;events.push({type:'text_delta',contentIndex:0,delta,partial:output});}
       const MODEL=selected.id,levels=CLAUDE_MODELS.find(entry=>entry.id===MODEL)?.efforts??[],effort=levels.length?options?.reasoning??'medium':undefined;
@@ -39,7 +39,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
           const path=join(cwd,'system.txt');await writeFile(path,getCurrentSystemPrompt(context.messages)+'\n\nReturn exactly the requested structured proposal. The transcript below contains the complete Pi history. Only propose listed Pi tools; Pi performs all tool execution and approvals. Native StructuredOutput formats this response. Never invoke native actions.'+(images.length?' Transcript image placeholders with attachment N refer to the N-th image block of the user message.':''),{mode:0o600});
           return ['-p','--safe-mode','--restricted','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--setting-sources','','--settings','{"disableAllHooks":true,"enabledPlugins":{}}','--disable-slash-commands','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--no-session-persistence','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--include-hook-events','--verbose','--max-turns','3','--model',MODEL,...(effort?['--effort',effort]:[]),'--system-prompt-file',path,'--json-schema',JSON.stringify(schema)];
         },onStart:send=>{pending={id:randomUUID(),subtype:'initialize'};send({type:'control_request',request_id:pending.id,request:{subtype:'initialize',hooks:{},sdkMcpServers:[]}});},onLine:(line,send)=>{
-          if(!line.trim())return;failure='native_protocol';const event=JSON.parse(line);requireGuard(object(event)&&!terminal);
+          if(broken||!line.trim())return;try{failure='native_protocol';const event=JSON.parse(line);requireGuard(object(event)&&!terminal);
           if(event.type==='control_response'){
             requireGuard(pending&&event.response?.subtype==='success'&&event.response?.request_id===pending.id);
             const initialize=pending!.subtype==='initialize';
@@ -61,8 +61,10 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
           requireGuard(stage===3);
           if(event.type==='system'){failure='native_system_subtype';
             if(event.subtype==='status'){requireGuard(init&&exactKeys(event,['type','subtype','status','session_id','uuid'])&&(event.status==='requesting'||event.status===null)&&uuid(event.uuid)&&event.session_id===nativeSessionId);return;}
+            if(event.subtype==='thinking_tokens'){requireGuard(init&&exactKeys(event,['type','subtype','estimated_tokens','estimated_tokens_delta','session_id','uuid'])&&event.session_id===nativeSessionId&&uuid(event.uuid)&&Number.isSafeInteger(event.estimated_tokens)&&event.estimated_tokens>=0&&Number.isSafeInteger(event.estimated_tokens_delta));return;}
+            if(event.subtype==='api_retry'){requireGuard(init&&event.session_id===nativeSessionId&&uuid(event.uuid));return;}
             requireGuard(event.subtype==='init'&&!init&&uuid(event.session_id)&&event.model===MODEL&&Array.isArray(event.tools)&&event.tools.every((name:any)=>name==='StructuredOutput')&&empty(event.mcp_servers)&&empty(event.skills));
-            requireGuard((event.plugins??[]).every((plugin:any)=>['agents-md','telemetry'].includes(typeof plugin==='string'?plugin:plugin.name))&&empty(event.slash_commands??[]));nativeSessionId=event.session_id;init=true;return;
+            requireGuard((event.plugins??[]).every((plugin:any)=>['agents-md','telemetry'].includes(typeof plugin==='string'?plugin:plugin.name)||object(plugin)&&typeof plugin.name==='string'&&plugin.name!==''&&plugin.path==='builtin'&&plugin.source===`${plugin.name}@builtin`)&&empty(event.slash_commands??[]));nativeSessionId=event.session_id;init=true;return;
           }
           requireGuard(init);
           if(event.type==='stream_event'){
@@ -74,11 +76,11 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
             return;
           }
           if(event.type==='assistant'){requireGuard(Array.isArray(event.message?.content)&&event.message.content.every((part:any)=>['text','thinking'].includes(part.type)||part.type==='tool_use'&&part.name==='StructuredOutput'&&structuredIds.has(part.id)));return;}
-          if(event.type==='user'){requireGuard(Array.isArray(event.message?.content)&&event.message.content.every((part:any)=>part.type==='tool_result'&&structuredIds.has(part.tool_use_id)));return;}
+          if(event.type==='user'){const content=event.message?.content;requireGuard(Array.isArray(content)&&(content.every((part:any)=>part.type==='tool_result'&&structuredIds.has(part.tool_use_id))||event.isSynthetic===true&&event.session_id===nativeSessionId&&content.length===1&&content[0]?.type==='text'&&typeof content[0].text==='string'&&content[0].text.startsWith('[structured-output-enforce]')));return;}
           if(event.type==='rate_limit_event')return;
-          if(event.type==='result'){requireGuard(event.subtype==='success'&&event.is_error===false&&object(event.structured_output));terminal=event;return;}
+          if(event.type==='result'){if(event.is_error===true&&typeof event.result==='string'&&event.result.trim())nativeError=event.result.replace(/\s+/g,' ').trim().slice(0,300);requireGuard(event.subtype==='success'&&event.is_error===false&&object(event.structured_output));terminal=event;return;}
           throw new Error('Unexpected native protocol event');
-        }});
+        }catch(error){broken=true;throw error;}}});
         operation.signal.throwIfAborted();requireGuard(identity(selected)&&owner.isConnected());failure='terminal_proposal';requireGuard(result.exitCode===0&&result.drained&&terminal&&init&&stage===3&&!pending);
         const proposal=terminal.structured_output;requireGuard(exactKeys(proposal,['text','toolCalls'])&&typeof proposal.text==='string'&&Array.isArray(proposal.toolCalls)&&proposal.toolCalls.length<=32&&proposal.text.startsWith(emitted));
         const calls=proposal.toolCalls.map((call:any)=>{requireGuard(exactKeys(call,['name','arguments'])&&typeof call.name==='string'&&object(call.arguments));const tool={type:'toolCall' as const,id:randomUUID(),name:call.name,arguments:call.arguments};tool.arguments=validateToolCall(tools,tool);return tool;});
@@ -88,7 +90,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
         text(proposal.text);if(output.content[0]?.type==='text')events.push({type:'text_end',contentIndex:0,content:proposal.text,partial:output});
         for(const tool of calls){const index=output.content.length;output.content.push(tool);events.push({type:'toolcall_start',contentIndex:index,partial:output});events.push({type:'toolcall_end',contentIndex:index,toolCall:tool,partial:output});}
         output.stopReason=calls.length?'toolUse':'stop';events.push({type:'done',reason:output.stopReason,message:output});
-      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Official CLI request cancelled':`Official CLI request failed its transport or safety contract (${failure})`;events.push({type:'error',reason:output.stopReason,error:output});}
+      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Official CLI request cancelled':nativeError?`Claude Code: ${nativeError}`:`Official CLI request failed its transport or safety contract (${failure})`;events.push({type:'error',reason:output.stopReason,error:output});}
       finally{options?.signal?.removeEventListener('abort',abort);events.end();}
     })();return events;
   }
