@@ -61,6 +61,21 @@ test('all current Claude CLI models are registered and each runs with its own id
   }finally{await owner.close();}
 });
 
+test('transcript images become native image blocks with numbered placeholders, and plain transcripts stay a string',async()=>{
+  await mode('normal');const {owner,runtime}=await setup('images');
+  try{
+    const model=runtime.getModel(CLAUDE_PROVIDER_ID,'claude-sonnet-5-5')!;assert.deepEqual(model.input,['text','image']);
+    const stream=runtime.streamSimple(model,{messages:[{role:'user',content:[{type:'text',text:'what is this?'},{type:'image',data:'QUJD',mimeType:'image/png'},{type:'image',data:'REVG',mimeType:'image/jpeg'}],timestamp:Date.now()}]},{reasoning:'high'});
+    for await(const event of stream)void event;assert.equal((await stream.result()).stopReason,'stop');
+    const row=[...(await observed())].reverse().find(item=>item.blocks)!;
+    assert.deepEqual(row.blocks.slice(1),[{type:'image',source:{type:'base64',media_type:'image/png',data:'QUJD'}},{type:'image',source:{type:'base64',media_type:'image/jpeg',data:'REVG'}}]);
+    assert.deepEqual(row.transcript[0].content,[{type:'text',text:'what is this?'},{type:'image',mimeType:'image/png',attachment:1},{type:'image',mimeType:'image/jpeg',attachment:2}]);
+    assert.ok(!JSON.stringify(row.blocks[0]).includes('QUJD'),'Image bytes are stripped from the transcript text');
+    const plain=runtime.streamSimple(model,{messages:[{role:'user',content:'hello',timestamp:Date.now()}]},{reasoning:'high'});for await(const event of plain)void event;assert.equal((await plain.result()).stopReason,'stop');
+    assert.equal([...(await observed())].reverse().find(item=>item.transcript)!.blocks,undefined,'Without images the user message content is the plain serialized string');
+  }finally{await owner.close();}
+});
+
 test('real Pi approval Allow and Deny return actual tool results to the next CLI request',async()=>{
   await mode('normal');const dir=join(scratch,'pi'),workspace=join(scratch,'workspace');await mkdir(dir,{recursive:true});await mkdir(workspace);await writeFile(join(workspace,'note.txt'),'owned Pi read result\n');
   const storage=new Storage(join(dir,'state.sqlite')),host=new PiHost(storage,dir,async(id,type,payload,durable)=>{if(durable)await storage.event(id,type,payload);});await host.init();await host.nativeProviders.connect(CLAUDE_PROVIDER_ID);

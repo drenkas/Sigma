@@ -469,6 +469,34 @@ PiHost.prototype.init=async function(){await original.call(this);this.runtime.re
   }finally{await stop(child);}
 });
 
+test("prompt images are validated, need an image-capable model and are not stored in commands",async()=>{
+  const dataDir=join(testRoot,"prompt-images"),preload=join(dataDir,"vision-preload.mjs");await mkdir(dataDir,{recursive:true});
+  await writeFile(preload,`import { isMainThread } from 'node:worker_threads';
+if(isMainThread){
+const { PiHost }=await import(${JSON.stringify(new URL("./pi-host.ts",import.meta.url).href)});
+const original=PiHost.prototype.init;
+PiHost.prototype.init=async function(){await original.call(this);const runtime=this.runtime;runtime.registerProvider('sigma-vision',{api:'sigma-demo',baseUrl:'http://127.0.0.1/unused',apiKey:'local-demo',streamSimple:(_model,context,options)=>runtime.streamSimple(runtime.getModel('sigma-demo','offline'),context,options),models:[{id:'eyes',name:'Vision demonstration',reasoning:false,input:['text','image'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:16384,maxTokens:1024}]});await runtime.refresh({allowNetwork:false});};
+}\n`);
+  const port=await freePort(),origin=`http://127.0.0.1:${port}`,child=await launch(port,dataDir,preload);
+  try{
+    const bootstrap=await fetch(`${origin}/api/bootstrap`,{method:"POST",headers:{Origin:origin}}),cookie=bootstrap.headers.get("set-cookie")!.split(";")[0];
+    const req=async(path:string,method="GET",body?:unknown,id?:string)=>{const res=await fetch(`${origin}/api${path}`,{method,headers:{Origin:origin,Cookie:cookie,...(body===undefined?{}:{"Content-Type":"application/json"}),...(id?{"X-Command-Id":id}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:res.status,data:await res.json() as any};};
+    const models=(await req("/models")).data.models as any[];
+    assert.equal(models.find(entry=>entry.provider==="sigma-demo")?.images,false);assert.equal(models.find(entry=>entry.provider==="sigma-vision")?.images,true);
+    const textId=(await req("/sessions","POST",{cwd:root,model:"sigma-demo/offline"},crypto.randomUUID())).data.id,visionId=(await req("/sessions","POST",{cwd:root,model:"sigma-vision/eyes"},crypto.randomUUID())).data.id;
+    const png={mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="},send=(id:string,body:unknown,command=crypto.randomUUID())=>req(`/sessions/${id}/prompt`,"POST",body,command);
+    for(const [images,why] of [[[{...png,mimeType:"image/svg+xml"}],"mime"],[Array(5).fill(png),"count"],[[{...png,data:"not base64!"}],"base64"],[[{...png,data:"A".repeat(7_200_000)}],"size"],[[{mimeType:"image/png"}],"data"],["png","shape"]] as const)assert.equal((await send(visionId,{text:"look",images})).status,400,`Rejects images: ${why}`);
+    assert.equal((await send(visionId,{text:"",images:[]})).status,400,"Empty text still needs an image");
+    const refused=await send(textId,{text:"look",images:[png]});assert.equal(refused.status,400);assert.match(refused.data.error,/cannot read images/,"A text-only model rejects images");
+    const command=crypto.randomUUID(),accepted=await send(visionId,{text:"",images:[png]},command);assert.equal(accepted.status,200);assert.equal(accepted.data.accepted,true);
+    await waitFor(async()=>(await req(`/sessions/${visionId}`)).data.messages.length===2);
+    assert.equal((await req(`/sessions/${visionId}`)).data.messages[0].images,1,"History reports the image count without data");
+    assert.equal((await send(visionId,{text:"",images:[png]},command)).data.accepted,false,"Same command and images replay");
+    assert.equal((await send(visionId,{text:"",images:[{...png,data:Buffer.from("other").toString("base64")}]},command)).status,409,"Different images cannot reuse a command ID");
+    assert.ok(!JSON.stringify(await req(`/sessions/${visionId}`)).includes(png.data),"Image data never reaches the client");
+  }finally{await stop(child);}
+});
+
 test("direct uncertain write requires exact observed reconciliation before another session can edit",async()=>{
   const dir=join(testRoot,"direct-reconcile"),source=join(dir,"source"),dataDir=join(dir,"data");await mkdir(source,{recursive:true});await mkdir(dataDir);
   const git=(...args:string[])=>execFileSync("git",["-c","core.hooksPath=/dev/null","-c","commit.gpgSign=false",...args],{cwd:source,env:{...process.env,GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_AUTHOR_NAME:"Fixture",GIT_AUTHOR_EMAIL:"fixture@example.invalid",GIT_COMMITTER_NAME:"Fixture",GIT_COMMITTER_EMAIL:"fixture@example.invalid"}});

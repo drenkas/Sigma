@@ -29,7 +29,7 @@ if(process.argv.includes('auth')){
       const envelope={subtype:'success',request_id:mode==='wrong-id'?'wrong':request.request_id,response,...(subtype==='initialize'?{pending_permission_requests:mode==='permission'?[{request_id:'bad'}]:[],pending_user_dialog_requests:[]}:{}),...(subtype==='get_hooks_listing'&&mode==='permission-later'?{pending_permission_requests:[{request_id:'bad'}]}:{}),...(subtype==='get_settings'&&mode==='permission-malformed'?{pending_user_dialog_requests:null}:{})};
       send({type:'control_response',response:envelope});return;
     }
-    if(request.type!=='user'||stage!==3||outputSent)process.exit(7);outputSent=true;const payload=JSON.parse(request.message.content);record({transcript:payload.transcript,currentTools:payload.currentTools});
+    if(request.type!=='user'||stage!==3||outputSent)process.exit(7);outputSent=true;const blocks=Array.isArray(request.message.content)?request.message.content:undefined,payload=JSON.parse(blocks?blocks[0].text:request.message.content);record({transcript:payload.transcript,currentTools:payload.currentTools,...(blocks?{blocks}:{})});
     const last=payload.transcript.at(-1),toolResult=[...payload.transcript].reverse().find(message=>message.role==='toolResult'),user=[...payload.transcript].reverse().find(message=>message.role==='user');
     const input=typeof user?.content==='string'?user.content:user?.content?.filter(part=>part.type==='text').map(part=>part.text).join('')??'';
     const complete=()=>{

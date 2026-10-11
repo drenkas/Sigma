@@ -5,7 +5,7 @@ import { constants, lstatSync, realpathSync, openSync, readFileSync, readdirSync
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { Type, getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import { CODE_PROFILE, REPOSITORY_CODE_PROFILE, MULTI_REPO_PROFILE, READ_ONLY_PROFILE, NESTED_READ_PROFILE, NESTED_CODE_PROFILE, NESTED_REPOSITORY_PROFILE, NESTED_PARALLEL_PROFILE, NESTED_PARALLEL_WORKTREE_PROFILE, NESTED_WORKER_PROFILE, REVIEW_PROFILE, type FileChange, type WriteOutcome, type WriteRecoveryView, type WriteRecoveryState, type SessionMode, type WorkspaceMode, type AgentView, type ApprovalView, type RecoveryInput, type RecoveryAction, type SessionPolicy, type SessionView, type ProjectTaskView, type RunMetadata, type GraphFact } from "../../packages/contracts/index.js";
 import { Storage } from "./storage.js";
 import { registerDemoProvider } from "./demo-provider.js";
@@ -115,7 +115,8 @@ export function visibleMessages(session:AgentSession,cwd:string):SessionView["me
     const at=typeof message.timestamp==="number"?message.timestamp:undefined;
     if(message.role==="user"){
       close();const text=typeof message.content==="string"?message.content:message.content.filter((part:any)=>part.type==="text").map((part:any)=>part.text).join("");
-      if(!text)return;owner={id:String(index),role:"user",text,...(at!==undefined?{at}:{})};out.push(owner);turn={startedAt:at??0,endedAt:at??0,steps:[]};return;
+      const images=typeof message.content==="string"?0:message.content.filter((part:any)=>part.type==="image").length;
+      if(!text&&!images)return;owner={id:String(index),role:"user",text,...(images?{images}:{}),...(at!==undefined?{at}:{})};out.push(owner);turn={startedAt:at??0,endedAt:at??0,steps:[]};return;
     }
     if(message.role!=="assistant"&&message.role!=="toolResult")return;
     if(turn&&at!==undefined)turn.endedAt=Math.max(turn.endedAt,at);
@@ -177,7 +178,8 @@ export class PiHost {
     // unrelated provider with no models. Every availability consumer is fenced.
     try{this.nativeIdentity?.();return (await this.runtime!.getAvailable()).filter(model=>this.modelAllowed(model));}catch{throw new Error("Model availability could not refresh");}
   }
-  async models(){const all=await this.availableModels(),old=new Set([...previousGeneration(all),...geminiNonFlash(all)]);return all.map(m=>({provider:m.provider,id:m.id,name:m.name,reasoningLevels:getSupportedThinkingLevels(m),...(old.has(`${m.provider}/${m.id}`)?{legacy:true}:{})}));}
+  async models(){const all=await this.availableModels(),old=new Set([...previousGeneration(all),...geminiNonFlash(all)]);return all.map(m=>({provider:m.provider,id:m.id,name:m.name,images:!!m.input?.includes("image"),reasoningLevels:getSupportedThinkingLevels(m),...(old.has(`${m.provider}/${m.id}`)?{legacy:true}:{})}));}
+  async acceptsImages(id:string){return !!(await this.get(id)).session.model?.input?.includes("image");}
   async roles():Promise<RoleCatalog>{const stored=await this.storage.call<unknown|null>("roles");return stored?normalizeRoles(stored):defaultRoles();}
   async saveRoles(value:unknown){
     const catalog=roleInput(value),models=await this.availableModels();
@@ -1112,8 +1114,8 @@ export class PiHost {
     this.promptAdmissions.add(admission);
     try{admission.check();await this.storage.call("assertOwnerAvailable",{id});admission.check();return await action(admission);}finally{this.promptAdmissions.delete(admission);finish();}
   }
-  async prompt(id:string,text:string,behavior?:"steer"|"followUp",commandId?:string,rootId?:string,review?:{agentId:string;id:string;revision:string},promptAdmission?:PromptAdmission):Promise<"queued"|"dispatched">{
-    if(!promptAdmission)return this.withPromptAdmission(id,admission=>this.prompt(id,text,behavior,commandId,rootId,review,admission));
+  async prompt(id:string,text:string,behavior?:"steer"|"followUp",commandId?:string,rootId?:string,review?:{agentId:string;id:string;revision:string},promptAdmission?:PromptAdmission,images?:ImageContent[]):Promise<"queued"|"dispatched">{
+    if(!promptAdmission)return this.withPromptAdmission(id,admission=>this.prompt(id,text,behavior,commandId,rootId,review,admission,images));
     let admission:"rejected"|"dispatched"|"unknown"="rejected";
     let childRun:ChildRun|undefined,finish=()=>{},timer:ReturnType<typeof setTimeout>|undefined;
     let run:Promise<void>|undefined,unsubscribeQueue=()=>{},released=false,admissionLock=false;
@@ -1122,6 +1124,7 @@ export class PiHost {
       promptAdmission.check();
       if(rootId){if(this.admittingChildren.has(id))throw new Error("Child prompt admission is already in progress");this.admittingChildren.add(id);admissionLock=true;}
       const {session,row}=await this.get(id);
+      if(images?.length&&!session.model?.input?.includes("image"))throw new Error("The selected model cannot read images");
       promptAdmission.check();await this.requireReadyTask(row);promptAdmission.check();
       if(rootId){
         if((await this.storage.call<DelegationContext>("descendantMember",{rootId,agentId:id})).root.id!==rootId||await this.storage.call<boolean>("reviewAgent",{agentId:id}))throw new Error("Child messaging unavailable");
@@ -1154,7 +1157,7 @@ export class PiHost {
       promptAdmission.check();
       if(!await this.storage.call<boolean>("markSessionDispatch",{id:row.id}))throw new Error("Session dispatch ownership is unavailable");
       promptAdmission.check();
-      run=session.prompt(text,{...(behavior?{streamingBehavior:behavior}:{}),preflightResult:accepted=>{callbackSeen=true;try{promptAdmission.check();}catch(error){decide(false);throw error;}decide(accepted);}});
+      run=session.prompt(text,{...(behavior?{streamingBehavior:behavior}:{}),...(images?.length?{images}:{}),preflightResult:accepted=>{callbackSeen=true;try{promptAdmission.check();}catch(error){decide(false);throw error;}decide(accepted);}});
       if(childRun)void run.finally(releaseChild).catch(()=>{});
       void run.then(()=>{if(!callbackSeen)decide(null);},()=>{if(!callbackSeen)decide(false);});
       const accepted=await preflight;

@@ -17,7 +17,7 @@ function requireGuard(value:unknown){if(!value)throw new Error('Native CLI safet
 function exactKeys(value:any,keys:string[]){return object(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));}
 
 export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
-  const models:Model<typeof API>[]=CLAUDE_MODELS.map(entry=>({provider:CLAUDE_PROVIDER_ID,api:API,id:entry.id,name:entry.name,baseUrl:'',reasoning:entry.efforts.length>0,...(entry.efforts.length?{thinkingLevelMap:{off:null,minimal:null,low:'low',medium:'medium',high:'high',xhigh:entry.efforts.includes('xhigh')?'xhigh':null,max:'max'}}:{}),input:['text'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}));
+  const models:Model<typeof API>[]=CLAUDE_MODELS.map(entry=>({provider:CLAUDE_PROVIDER_ID,api:API,id:entry.id,name:entry.name,baseUrl:'',reasoning:entry.efforts.length>0,...(entry.efforts.length?{thinkingLevelMap:{off:null,minimal:null,low:'low',medium:'medium',high:'high',xhigh:entry.efforts.includes('xhigh')?'xhigh':null,max:'max'}}:{}),input:['text','image'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}));
   function identity(selected?:Model<any>){const valid=runtime.getProvider(CLAUDE_PROVIDER_ID)===runtime.getRegisteredNativeProvider(CLAUDE_PROVIDER_ID)&&runtime.getRegisteredNativeProvider(CLAUDE_PROVIDER_ID)===provider&&(!selected||selected.provider===CLAUDE_PROVIDER_ID&&selected.api===API&&MODEL_IDS.has(selected.id));owner.setCollision(!valid);return valid;}
   function stream(selected:Model<any>,context:TranscriptContext,options?:SimpleStreamOptions){
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
@@ -32,9 +32,11 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
         requireGuard(!options?.deferred&&!options?.samplingParams&&!options?.maxTokens&&!options?.temperature&&!options?.thinkingBudgets);
         const payload={transcript:context.messages,currentTools:tools},serialized=JSON.stringify(payload);
         if(options?.onPayload){const result=await options.onPayload(payload,selected);requireGuard(JSON.stringify(payload)===serialized&&(result===undefined||JSON.stringify(result)===serialized));}
+        // Images travel as native image blocks after the transcript text; the JSON keeps a numbered placeholder (1-based) in their place.
+        const images:{mimeType:string;data:string}[]=[],wire=JSON.stringify(payload,(_key,value)=>object(value)&&value.type==='image'&&typeof value.data==='string'?{type:'image',mimeType:value.mimeType,attachment:images.push({mimeType:value.mimeType,data:value.data})}:value);
         operation.signal.throwIfAborted();events.push({type:'start',partial:output});
         const result=await owner.run({signal:operation.signal,env:options?.env,timeoutMs:Math.min(options?.timeoutMs??120000,120000),prepare:async cwd=>{
-          const path=join(cwd,'system.txt');await writeFile(path,getCurrentSystemPrompt(context.messages)+'\n\nReturn exactly the requested structured proposal. The transcript below contains the complete Pi history. Only propose listed Pi tools; Pi performs all tool execution and approvals. Native StructuredOutput formats this response. Never invoke native actions.',{mode:0o600});
+          const path=join(cwd,'system.txt');await writeFile(path,getCurrentSystemPrompt(context.messages)+'\n\nReturn exactly the requested structured proposal. The transcript below contains the complete Pi history. Only propose listed Pi tools; Pi performs all tool execution and approvals. Native StructuredOutput formats this response. Never invoke native actions.'+(images.length?' Transcript image placeholders with attachment N refer to the N-th image block of the user message.':''),{mode:0o600});
           return ['-p','--safe-mode','--restricted','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--setting-sources','','--settings','{"disableAllHooks":true,"enabledPlugins":{}}','--disable-slash-commands','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--no-session-persistence','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--include-hook-events','--verbose','--max-turns','3','--model',MODEL,...(effort?['--effort',effort]:[]),'--system-prompt-file',path,'--json-schema',JSON.stringify(schema)];
         },onStart:send=>{pending={id:randomUUID(),subtype:'initialize'};send({type:'control_request',request_id:pending.id,request:{subtype:'initialize',hooks:{},sdkMcpServers:[]}});},onLine:(line,send)=>{
           if(!line.trim())return;failure='native_protocol';const event=JSON.parse(line);requireGuard(object(event)&&!terminal);
@@ -52,7 +54,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
               stage=2;pending={id:randomUUID(),subtype:'get_settings'};
             }else if(subtype==='get_settings'){
               requireGuard(stage===2&&payload.effective?.disableAllHooks===true&&exactKeys(payload.effective?.enabledPlugins,[])&&payload.applied?.model===MODEL&&(effort===undefined?payload.applied?.effort==null:payload.applied?.effort===effort)&&payload.applied?.advisor===null&&payload.applied?.ultracode===false);
-              stage=3;send({type:'user',message:{role:'user',content:serialized},parent_tool_use_id:null,session_id:randomUUID()});send.end();return;
+              stage=3;send({type:'user',message:{role:'user',content:images.length?[{type:'text',text:wire},...images.map(image=>({type:'image',source:{type:'base64',media_type:image.mimeType,data:image.data}}))]:wire},parent_tool_use_id:null,session_id:randomUUID()});send.end();return;
             }else throw new Error('Unexpected native control');
             send({type:'control_request',request_id:pending!.id,request:{subtype:pending!.subtype}});return;
           }

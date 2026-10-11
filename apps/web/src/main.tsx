@@ -14,9 +14,10 @@ import { Roles } from "./Roles.js";
 import { Cleanup } from "./Cleanup.js";
 import { Providers } from "./Providers.js";
 import { UpdateButton } from "./UpdateButton.js";
+import { MAX_IMAGES, IMAGE_TYPES, fingerprint, readImages, type Attachment } from "./attachments.js";
 import "./style.css";
 
-type Model = { provider:string; id:string; name:string; reasoningLevels?:string[]; legacy?:boolean };
+type Model = { provider:string; id:string; name:string; images:boolean; reasoningLevels?:string[]; legacy?:boolean };
 type Listed = { id:string; cwd:string; sourceCwd?:string; model:string; status:string; created_at?:number; title?:string|null; archived_at?:number|null };
 type Notice = { kind:"error"|"warning"|"info"; text:string };
 type Conn = "connecting"|"ready"|"live"|"reconnecting"|"unreachable";
@@ -76,11 +77,11 @@ function RunBadge(p:{status:string;quiet?:boolean}){
   const info=()=>RUN[p.status]||{label:"Unknown",hint:`Unrecognized status “${p.status||"none"}”.`};
   return <span classList={{badge:true,[`st-${known()}`]:true,quiet:!!p.quiet}} title={info().hint}><span class="glyph" aria-hidden="true"/>{info().label}</span>;
 }
-function Icon(p:{name:"menu"|"panel"|"sidebar"|"close"|"refresh"|"plus"|"stop"|"send"|"copy"|"folder"|"cpu"|"bot"|"compose"|"up"|"chevron"|"pencil"|"archive"|"restore"|"more"}){
+function Icon(p:{name:"menu"|"panel"|"sidebar"|"close"|"refresh"|"plus"|"stop"|"send"|"copy"|"folder"|"cpu"|"bot"|"compose"|"up"|"chevron"|"pencil"|"archive"|"restore"|"more"|"attach"|"image"}){
   const d:Record<string,string>={
     menu:"M3 5h14M3 10h14M3 15h14",panel:"M3 4h14v12H3zM12 4v12",sidebar:"M3 4h14v12H3zM8 4v12",close:"M5 5l10 10M15 5L5 15",refresh:"M16 10a6 6 0 1 1-2-4.5M16 3v4h-4",
     plus:"M10 4v12M4 10h12",stop:"M6 6h8v8H6z",send:"M4 10h11M11 5l5 5-5 5",copy:"M7 7h9v9H7zM4 13V4h9",
-    folder:"M3 6h5l2 2h7v8H3z",compose:"M11 4H4v12h12V9M8 12l1-3 6-6 2 2-6 6z",chevron:"M8 5l5 5-5 5",pencil:"M4 16l1-4 8-8 3 3-8 8zM12 5l3 3",archive:"M3 5h14v3H3zM4 8v8h12V8M8 11h4",more:"M5 10h.01M10 10h.01M15 10h.01",restore:"M4 10a6 6 0 1 0 2-4.5M4 3v4h4",up:"M10 16V4M5 9l5-5 5 5",bot:"M4 7h12v9H4zM10 4v3M8 3.5h4M7.5 10.5v1.5M12.5 10.5v1.5M7.5 14h5M2 10v3M18 10v3",cpu:"M6 6h8v8H6zM8 3v3M12 3v3M8 14v3M12 14v3M3 8h3M3 12h3M14 8h3M14 12h3",
+    folder:"M3 6h5l2 2h7v8H3z",compose:"M11 4H4v12h12V9M8 12l1-3 6-6 2 2-6 6z",chevron:"M8 5l5 5-5 5",pencil:"M4 16l1-4 8-8 3 3-8 8zM12 5l3 3",archive:"M3 5h14v3H3zM4 8v8h12V8M8 11h4",more:"M5 10h.01M10 10h.01M15 10h.01",attach:"M16 9.5l-6 6a3.5 3.5 0 0 1-5-5l7-7a2.5 2.5 0 0 1 3.5 3.5l-7 7a1.2 1.2 0 0 1-1.7-1.7l6-6",image:"M3 4h14v12H3zM3 14l4-4 3 3 3-3 4 4M13.5 7.5h.01",restore:"M4 10a6 6 0 1 0 2-4.5M4 3v4h4",up:"M10 16V4M5 9l5-5 5 5",bot:"M4 7h12v9H4zM10 4v3M8 3.5h4M7.5 10.5v1.5M12.5 10.5v1.5M7.5 14h5M2 10v3M18 10v3",cpu:"M6 6h8v8H6zM8 3v3M12 3v3M8 14v3M12 14v3M3 8h3M3 12h3M14 8h3M14 12h3",
   };
   return <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d={d[p.name]}/></svg>;
 }
@@ -124,7 +125,7 @@ function App(){
   function returnGraphRoot(){++graphReadGeneration;setGraphNode(null);setGraphHistory(null);setGraphHistoryError("");if(current())sessionStorage.setItem("sigma-graph-view",JSON.stringify({scope:current()!.id,node:current()!.id}));}
   const [switching,setSwitching]=createSignal(false);
   const [workspaceMode,setWorkspaceMode]=createSignal<"direct"|"worktree">("direct"),[access,setAccess]=createSignal<"full"|"ask">("full"),[thinking,setThinking]=createSignal<string[]>([]);
-  const [workspace,setWorkspace]=createSignal(""),[selectedModel,setSelectedModel]=createSignal(""),[reasoning,setReasoning]=createSignal(""),[prompt,setPrompt]=createSignal(""),[draft,setDraft]=createSignal("");
+  const [workspace,setWorkspace]=createSignal(""),[selectedModel,setSelectedModel]=createSignal(""),[reasoning,setReasoning]=createSignal(""),[prompt,setPrompt]=createSignal(""),[draft,setDraft]=createSignal(""),[attachments,setAttachments]=createSignal<Attachment[]>([]),[dragging,setDragging]=createSignal(false);
   const [notice,setNotice]=createSignal<Notice|null>(null),[busy,setBusy]=createSignal(false),[tools,setTools]=createSignal<Tool[]>([]),[agyActivity,setAgyActivity]=createSignal<AgyRecord[]>([]),[shown,setShown]=createSignal(200);
   const [conn,setConn]=createSignal<Conn>("connecting"),[attempt,setAttempt]=createSignal(0),[booted,setBooted]=createSignal(false);
   const [loadingId,setLoadingId]=createSignal<string|null>(null),[openFailed,setOpenFailed]=createSignal<{id:string;text:string}|null>(null);
@@ -160,7 +161,7 @@ function App(){
   const focusedTask=createMemo(()=>projectTasks().find(t=>t.id===taskFocusId()));
   const sessionArchived=()=>!!current()?.archivedAt;
   const taskUnresolved=()=>sessionArchived()||!!focusedTask()&&(focusedTask()!.status!=="running"||!!focusedTask()!.archivedAt);
-  const prompts=new Map<string,string>();
+  const prompts=new Map<string,string>(),attachmentDrafts=new Map<string,Attachment[]>();
   let stream:EventSource|undefined;let cursor=0;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;let historyTimer:ReturnType<typeof setTimeout>|undefined;let recovering=false;let openGeneration=0;
   let scroller:HTMLDivElement|undefined,composer:HTMLTextAreaElement|undefined,detailsPanel:HTMLElement|undefined,detailsTitle:HTMLHeadingElement|undefined,recoverySection:HTMLElement|undefined,treeSection:HTMLElement|undefined,navPanel:HTMLElement|undefined,navTitle:HTMLHeadingElement|undefined,stick=true;
 
@@ -181,11 +182,44 @@ function App(){
   const listed=()=>sessions().find(s=>s.id===current()?.id);
   const sessionTitle=(s:Listed)=>s.title?firstLine(s.title,64):"Untitled session";
   const duplicate=(s:Listed)=>sessions().some(o=>o.id!==s.id&&sessionTitle(o)===sessionTitle(s));
-  const currentTitle=()=>{const first=current()?.messages.find(m=>m.role==="user");return first?firstLine(first.text,90):listed()?.title?firstLine(listed()!.title!,90):"Untitled session";};
+  const currentTitle=()=>{const first=current()?.messages.find(m=>m.role==="user");return first?firstLine(first.text||"Image",90):listed()?.title?firstLine(listed()!.title!,90):"Untitled session";};
   const running=()=>current()?.status==="running";
   const composing=()=>!showProjects()&&!showRoles()&&!showProviders()&&!current()&&!loadingId()&&!openFailed()&&!focusedTask();
   const activeRepositoryWork=()=>focusedTask()?.coordinatorId===current()?.id&&focusedTask()!.repositories.some(repo=>taskMembers()[repo.id]?.status==="running");
   const offline=()=>conn()==="reconnecting"||conn()==="unreachable";
+  const composerModel=()=>models().find(model=>`${model.provider}/${model.id}`===(current()?.model??selectedModel())),imagesAllowed=()=>composerModel()?.images!==false,imageWarning=()=>`${composerModel()?.name||modelName(current()?.model??selectedModel())} can't read images. Switch to a model that accepts images or remove them.`;
+  async function attach(files:File[]){
+    if(!files.length)return;
+    if(!imagesAllowed()){setNotice({kind:"warning",text:imageWarning()});return;}
+    const {added,errors}=await readImages(files,MAX_IMAGES-attachments().length);
+    if(added.length)setAttachments(x=>[...x,...added].slice(0,MAX_IMAGES));
+    if(errors.length)setNotice({kind:"warning",text:errors.join(" ")});
+  }
+  function removeAttachment(id:string){setAttachments(x=>x.filter(a=>a.id!==id));composer?.focus();}
+  // Image-only clipboards (screenshots) become attachments; anything carrying text keeps the browser's normal paste.
+  function onPasteImages(e:ClipboardEvent){
+    const data=e.clipboardData;if(!data||[...data.types].includes("text/plain"))return;
+    const files=[...data.items].filter(item=>item.kind==="file"&&item.type.startsWith("image/")).map(item=>item.getAsFile()).filter((file):file is File=>!!file);
+    if(files.length){e.preventDefault();void attach(files);}
+  }
+  const dropTarget={
+    onDragOver:(e:DragEvent)=>{if(![...(e.dataTransfer?.types??[])].includes("Files"))return;e.preventDefault();setDragging(true);},
+    onDragLeave:(e:DragEvent)=>{if(!(e.relatedTarget instanceof Node&&(e.currentTarget as HTMLElement).contains(e.relatedTarget)))setDragging(false);},
+    onDrop:(e:DragEvent)=>{if(![...(e.dataTransfer?.types??[])].includes("Files"))return;e.preventDefault();setDragging(false);void attach([...e.dataTransfer!.files]);},
+  };
+  function AttachTool(p:{id:string;disabled?:boolean}){
+    let input!:HTMLInputElement;
+    return <>
+      <input ref={input} id={p.id} type="file" class="sr-only" tabindex="-1" accept={IMAGE_TYPES.join(",")} multiple aria-label="Attach images" onChange={e=>{const files=[...e.currentTarget.files??[]];e.currentTarget.value="";void attach(files);}}/>
+      <button type="button" class="icon-btn sm" onClick={()=>input.click()} disabled={p.disabled||!imagesAllowed()||attachments().length>=MAX_IMAGES} aria-label="Attach images" title={!imagesAllowed()?imageWarning():attachments().length>=MAX_IMAGES?`At most ${MAX_IMAGES} images per message`:"Attach images (or paste / drop them)"}><Icon name="attach"/></button>
+    </>;
+  }
+  function AttachmentStrip(){
+    return <>
+      <Show when={attachments().length}><ul class="attach-strip" aria-label="Attached images"><For each={attachments()}>{a=><li class="attach-thumb"><img src={`data:${a.mimeType};base64,${a.data}`} alt={a.name}/><button type="button" class="attach-remove" aria-label={`Remove ${a.name}`} title="Remove" onClick={()=>removeAttachment(a.id)} onKeyDown={e=>{if(e.key==="Delete"||e.key==="Backspace"){e.preventDefault();removeAttachment(a.id);}}}><Icon name="close"/></button></li>}</For></ul></Show>
+      <Show when={attachments().length&&!imagesAllowed()}><p class="attach-warn" role="alert">{imageWarning()}</p></Show>
+    </>;
+  }
   const opening=()=>{const id=loadingId();return !!id&&current()?.id!==id;};
   const detailsBreakpoint=matchMedia("(max-width: 1279px)"),navBreakpoint=matchMedia("(max-width: 899px)");
   const overlayDetails=()=>detailsBreakpoint.matches,overlayNav=()=>navBreakpoint.matches;
@@ -247,7 +281,7 @@ function App(){
     stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(200);setLoadingId(id);setOpenFailed(null);
     if(queued()?.id!==id)setQueued(null);
     const snapshot=await api<SessionView>(`/sessions/${id}`);if(generation!==openGeneration)return;
-    if(current()?.id!==id){if(current())prompts.set(current()!.id,prompt());setPrompt(prompts.get(id)||"");}
+    if(current()?.id!==id){if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}setPrompt(prompts.get(id)||"");setAttachments(attachmentDrafts.get(id)||[]);}
     cursor=snapshot.cursor;stick=true;setCurrent(snapshot);setLoadingId(null);setSessions(x=>x.map(s=>s.id===id?{...s,status:snapshot.status}:s));setNotice(null);reconcilePrompt(snapshot);
     if(selectedChildId())void refreshChild(id,selectedChildId()!);
     if(snapshot.status!=="running")setQueued(null);
@@ -325,7 +359,7 @@ function App(){
     await select(task.coordinatorId);
   }
   const reasoningLevels=()=>models().find(model=>`${model.provider}/${model.id}`===selectedModel())?.reasoningLevels??[],canReason=()=>reasoningLevels().some(level=>level!=="off"),chosenReasoning=()=>canReason()&&reasoningLevels().includes(reasoning())?reasoning():"";
-  async function create(){const goal=prompt().trim();if(!selectedModel()||!goal)return;const selected=projectId();setBusy(true);setNotice(null);const key="pi-create",fingerprint=`${workspace()||"scratch"}|${selectedModel()}|parallel${workspaceMode()==="worktree"?"|worktree":""}${chosenReasoning()?`|reasoning:${chosenReasoning()}`:""}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),id=saved?.fingerprint===fingerprint?saved.id:crypto.randomUUID();sessionStorage.setItem(key,JSON.stringify({id,fingerprint}));try{const result=await api<{id:string;status:string}>("/sessions","POST",{...(workspace()?{cwd:workspace()}:{scratch:true}),model:selectedModel(),mode:"parallel",workspaceMode:workspaceMode(),...(chosenReasoning()?{reasoning:chosenReasoning()}:{})},id);if(result.status==="unknown")throw new Error("Previous create outcome is unknown. Inspect sessions before starting a new one.");sessionStorage.removeItem(key);setWorkspaceMode("direct");await refresh();if(projectId()!==selected)return;setTaskFocusId(null);setShowProjects(false);if(overlayNav())setNavOpen(false);await open(result.id);setPrompt(goal);queueMicrotask(resize);composer?.focus();await send();}catch(e){fail(e);void refreshWorkspaceRecovery().catch(()=>{});}finally{setBusy(false);}}
+  async function create(){const goal=prompt().trim(),images=attachments();if(!selectedModel()||!goal&&!images.length||images.length&&!imagesAllowed())return;const selected=projectId();setBusy(true);setNotice(null);const key="pi-create",fingerprint=`${workspace()||"scratch"}|${selectedModel()}|parallel${workspaceMode()==="worktree"?"|worktree":""}${chosenReasoning()?`|reasoning:${chosenReasoning()}`:""}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),id=saved?.fingerprint===fingerprint?saved.id:crypto.randomUUID();sessionStorage.setItem(key,JSON.stringify({id,fingerprint}));try{const result=await api<{id:string;status:string}>("/sessions","POST",{...(workspace()?{cwd:workspace()}:{scratch:true}),model:selectedModel(),mode:"parallel",workspaceMode:workspaceMode(),...(chosenReasoning()?{reasoning:chosenReasoning()}:{})},id);if(result.status==="unknown")throw new Error("Previous create outcome is unknown. Inspect sessions before starting a new one.");sessionStorage.removeItem(key);setWorkspaceMode("direct");await refresh();if(projectId()!==selected)return;setTaskFocusId(null);setShowProjects(false);if(overlayNav())setNavOpen(false);await open(result.id);setPrompt(goal);setAttachments(images);queueMicrotask(resize);composer?.focus();await send();}catch(e){fail(e);void refreshWorkspaceRecovery().catch(()=>{});}finally{setBusy(false);}}
   async function switchModel(model:string,level:string){const s=current();if(!s||switching())return;setSwitching(true);setNotice(null);try{await api(`/sessions/${s.id}/model`,"POST",{model,reasoning:level||null},crypto.randomUUID());const latest=await api<SessionView>(`/sessions/${s.id}`);setCurrent(x=>x?.id===s.id?{...x,model:latest.model,policy:latest.policy}:x);void refresh().catch(()=>{});}catch(e){fail(e);}finally{setSwitching(false);}}
   function ModelPicker(p:{welcome?:boolean}){
     const s=()=>p.welcome?null:current(),value=()=>s()?.model??selectedModel(),levels=()=>models().find(model=>`${model.provider}/${model.id}`===value())?.reasoningLevels??[],can=()=>levels().some(level=>level!=="off");
@@ -364,9 +398,9 @@ function App(){
       if(task)await selectTask(task);else throw new Error("Task was created but its snapshot is unavailable. Refresh the task list before continuing.");
     }catch(e){fail(e);void refreshTasks().catch(()=>{});void refreshWorkspaceRecovery().catch(()=>{});}finally{setTaskBusy(false);}
   }
-  async function send(){const text=prompt().trim(),s=current();if(!s||!text||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),reuse=saved?.text===text,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior}));try{const result=await api<{accepted:boolean;status:string;receipt?:string;mode?:"chrome"|"internal"}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior},id);if(text==="/browser internal"||text==="/browser chrome"){
+  async function send(){const text=prompt().trim(),images=attachments(),s=current();if(!s||!text&&!images.length||images.length&&!imagesAllowed()||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),print=fingerprint(images),reuse=saved?.text===text&&(saved.images??"")===print,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior,...(print?{images:print}:{})}));try{const result=await api<{accepted:boolean;status:string;receipt?:string;mode?:"chrome"|"internal"}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior,...(images.length?{images:images.map(({mimeType,data})=>({mimeType,data}))}:{})},id);if(text==="/browser internal"||text==="/browser chrome"){
       sessionStorage.removeItem(key);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();setNotice({kind:result.status==="completed"?"info":"warning",text:result.receipt??(result.status==="completed"?`Browser mode changed to ${result.mode}.`:`Browser mode command is ${result.status}; inspect Browser control before trying again.`)});void refresh().catch(()=>{});return;
-    }if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);prompts.delete(s.id);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
+    }if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);prompts.delete(s.id);attachmentDrafts.delete(s.id);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");setAttachments(x=>x.filter(a=>!images.includes(a)));resize();await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
   async function stop(){const s=current();if(!s)return;try{await api(`/sessions/${s.id}/abort`,"POST",{});}catch(e){fail(e);}}
   async function stopChild(agent:AgentView){
     const s=current();if(!s||offline()||stoppingChildren().includes(agent.id))return;
@@ -402,10 +436,10 @@ function App(){
   function insertExample(text:string){setPrompt(text);queueMicrotask(()=>{resize();composer?.focus();});}
   function resize(){if(!composer)return;composer.style.height="auto";composer.style.height=`${Math.min(composer.scrollHeight,window.innerHeight*0.4)}px`;}
   function clearCurrent(){
-    if(current())prompts.set(current()!.id,prompt());
+    if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}
     ++openGeneration;stream?.close();stream=undefined;
     if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;
-    returnGraphRoot();setCurrent(null);setLoadingId(null);setOpenFailed(null);setPrompt("");setDraft("");setTools([]);setQueued(null);setNotice(null);setConn("ready");
+    returnGraphRoot();setCurrent(null);setLoadingId(null);setOpenFailed(null);setPrompt("");setAttachments([]);setDraft("");setTools([]);setQueued(null);setNotice(null);setConn("ready");
     setSelectedChildId(null);setChildView(null);setChildText("");setMergePending(0);
   }
   function chooseProject(id:string){
@@ -878,14 +912,15 @@ function App(){
       <Show when={!opening()&&!openFailed()&&booted()&&!focusedTask()}>
         <div class="scroller"><div class="thread"><div class="thread-empty"><h2>What should we work on?</h2></div></div></div>
         <div class="dock">
-          <form class="composer" onSubmit={e=>{e.preventDefault();void create();}}>
+          <form class="composer" classList={{dragging:dragging()}} onSubmit={e=>{e.preventDefault();void create();}} {...dropTarget}>
+            <AttachmentStrip/>
             <label for="prompt" class="sr-only">Message to the root agent</label>
-            <textarea id="prompt" ref={composer} value={prompt()} rows="2" onInput={e=>{setPrompt(e.currentTarget.value);resize();}}
+            <textarea id="prompt" ref={composer} value={prompt()} rows="2" onInput={e=>{setPrompt(e.currentTarget.value);resize();}} onPaste={onPasteImages}
               onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void create();}}}
               placeholder="Describe the task for the root agent…"/>
             <div class="composer-foot">
-              <div class="composer-tools"><ModelPicker welcome/></div>
-              <div class="composer-actions"><button type="submit" class="send-btn" disabled={busy()||!models().length||!prompt().trim()} aria-label={busy()?"Starting":"Send"}><Icon name="up"/></button></div>
+              <div class="composer-tools"><AttachTool id="attach-welcome"/><ModelPicker welcome/></div>
+              <div class="composer-actions"><button type="submit" class="send-btn" disabled={busy()||!models().length||!prompt().trim()&&!attachments().length||!!attachments().length&&!imagesAllowed()} aria-label={busy()?"Starting":"Send"}><Icon name="up"/></button></div>
             </div>
           </form>
         </div>
@@ -913,7 +948,8 @@ function App(){
           </Show>
           <For each={graphNode()&&graphNode()!.id!==current()?.id&&!graphHistory()?[]:conversation()!.messages.slice(-shown())}>{m=><Show when={!m.interim}><article class={`msg ${m.role==="user"?"user":"assistant"}`}>
             <div class="msg-author" classList={{"sr-only":m.role==="user"}}>{m.role==="user"?"You":<><Logo class="avatar"/>Sigma<span class="muted">{graphNode()?.role??"root"} agent</span></>}</div>
-            <div class="msg-body">{m.text}</div>
+            <Show when={m.text||!m.images}><div class="msg-body">{m.text}</div></Show>
+            <Show when={m.images}><div class="msg-images"><Icon name="image"/>{m.images} image{m.images===1?"":"s"}</div></Show>
           </article><Show when={m.role==="user"&&(m.work||workLive()&&m.id===lastUserId())}><WorkBlock id={m.id} work={m.work} at={m.at} live={workLive()&&m.id===lastUserId()}/></Show></Show>}</For>
           <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body">{draft()}<span class="caret" aria-hidden="true"/></div></article></Show>
           <Show when={!graphNode()||graphNode()!.id===current()?.id}><Outcome/></Show>
@@ -944,13 +980,15 @@ function App(){
           <div class="recovery-strip" role="status"><span class="badge st-unknown"><span class="glyph" aria-hidden="true"/>Unknown</span><span>{current()!.recoveryInputs.length+current()!.recoveryActions.length} action{current()!.recoveryInputs.length+current()!.recoveryActions.length===1?" has an":"s have an"} unknown outcome. Nothing was replayed.</span><button class="link-btn" onClick={()=>openDetails("recovery")}>Review</button></div>
         </Show>
         <Show when={directNeeds()}><div class="recovery-strip" role="status"><span class="badge st-unknown"><span class="glyph" aria-hidden="true"/>Unknown</span><span>{directNeeds()} direct write{directNeeds()===1?" needs":"s need"} observed-state reconciliation.</span><button class="link-btn" onClick={()=>openDetails("writes")}>Review observed state</button></div></Show>
-        <form class="composer" classList={{running:running()}} onSubmit={e=>{e.preventDefault();void send();}}>
+        <form class="composer" classList={{running:running(),dragging:dragging()}} onSubmit={e=>{e.preventDefault();void send();}} {...dropTarget}>
+          <AttachmentStrip/>
           <label for="prompt" class="sr-only">{running()?"Queue a follow-up message":"Message to the root agent"}</label>
-          <textarea id="prompt" ref={composer} value={prompt()} rows="2" disabled={taskUnresolved()} onInput={e=>{setPrompt(e.currentTarget.value);resize();}}
+          <textarea id="prompt" ref={composer} value={prompt()} rows="2" disabled={taskUnresolved()} onInput={e=>{setPrompt(e.currentTarget.value);resize();}} onPaste={onPasteImages}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void send();}}}
             placeholder={running()?"Queue a follow-up — delivered after the current turn…":"Describe the task for the root agent…"}/>
           <div class="composer-foot">
             <div class="composer-tools">
+              <AttachTool id="attach-session" disabled={taskUnresolved()}/>
               <ModelPicker/>
               <span class="pill hide-xs">{MODE_LABEL[current()!.policy?.requested.mode??"read"]??"Read only"}</span>
               <Show when={queued()?.id===current()!.id&&running()}>
@@ -959,7 +997,7 @@ function App(){
             </div>
             <div class="composer-actions">
               <Show when={running()||children().some(a=>a.status==="running"||a.status==="idle")||activeRepositoryWork()}><button type="button" class="btn danger-ghost sm" onClick={stop} aria-label={current()!.policy?.requested.mode==="multi"?"Stop the coordinator and active repository work":"Stop the run and its child agents"}><Icon name="stop"/>Stop</button></Show>
-              <button type="submit" class="send-btn" classList={{wide:running()||busy()}} disabled={!prompt().trim()||busy()||taskUnresolved()} aria-label={busy()?"Sending":running()?"Queue follow-up":"Send"}><Show when={running()||busy()}><span>{busy()?"Sending…":"Queue"}</span></Show><Icon name="up"/></button>
+              <button type="submit" class="send-btn" classList={{wide:running()||busy()}} disabled={!prompt().trim()&&!attachments().length||busy()||taskUnresolved()||!!attachments().length&&!imagesAllowed()} aria-label={busy()?"Sending":running()?"Queue follow-up":"Send"}><Show when={running()||busy()}><span>{busy()?"Sending…":"Queue"}</span></Show><Icon name="up"/></button>
             </div>
           </div>
         </form>

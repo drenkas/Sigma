@@ -415,9 +415,23 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/reviews",async(req,reply)=>{
 app.post<{Params:{id:string;reviewId:string}}>("/api/sessions/:id/reviews/:reviewId/abort",async(req,reply)=>{
   try{await verification.abortReview(req.params.id,req.params.reviewId);return {stopped:true};}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Reviewer stop failed"});}
 });
-app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",async(req,reply)=>{
-  const {text,behavior,reviewId}=req.body as {text?:unknown;behavior?:unknown;reviewId?:unknown};
-  if(typeof text!=="string"||!text.trim()||text.length>20_000||!(behavior===undefined||behavior==="steer"||behavior==="followUp"))return reply.code(400).send({error:"Invalid prompt"});
+const IMAGE_TYPES=new Set(["image/png","image/jpeg","image/gif","image/webp"]);
+function promptImages(value:unknown):{mimeType:string;data:string}[]|undefined{
+  if(value===undefined)return [];
+  if(!Array.isArray(value)||value.length>4)return;
+  const out:{mimeType:string;data:string}[]=[];
+  for(const item of value){
+    const {mimeType,data}=(item??{}) as {mimeType?:unknown;data?:unknown};
+    if(typeof mimeType!=="string"||!IMAGE_TYPES.has(mimeType)||typeof data!=="string"||!data||data.length>7_000_000||data.length%4!==0||!/^[A-Za-z0-9+/]+={0,2}$/.test(data)||Buffer.byteLength(data,"base64")>5*1024*1024)return;
+    out.push({mimeType,data});
+  }
+  return out;
+}
+app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",{bodyLimit:32*1024*1024},async(req,reply)=>{
+  const {text,behavior,reviewId,images:rawImages}=req.body as {text?:unknown;behavior?:unknown;reviewId?:unknown;images?:unknown};
+  const images=promptImages(rawImages);
+  if(!images)return reply.code(400).send({error:"Up to 4 PNG, JPEG, GIF or WebP images of at most 5 MB each"});
+  if(typeof text!=="string"||!text.trim()&&!images.length||text.length>20_000||!(behavior===undefined||behavior==="steer"||behavior==="followUp"))return reply.code(400).send({error:"Invalid prompt"});
   const commandId=req.headers["x-command-id"];
   if(typeof commandId!=="string"||!isUUID(commandId))return reply.code(400).send({error:"Command ID required"});
   const modeCommand=text.trim()==="/browser internal"?"internal":text.trim()==="/browser chrome"?"chrome":undefined;
@@ -450,6 +464,7 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",async(req,reply)=>{
   }
   try{
     return await host.withPromptAdmission(req.params.id,async promptAdmission=>{
+      if(images.length&&!await host.acceptsImages(req.params.id))return reply.code(400).send({error:"The selected model cannot read images"});
       let submitted=text,review: {id:string;agentId:string;revision:string}|undefined;
       if(reviewId!==undefined){
         if(typeof reviewId!=="string"||!isUUID(reviewId))throw new Error("Valid review ID required");
@@ -459,10 +474,10 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",async(req,reply)=>{
         review=stored;
         submitted=`${text}\n\nReview evidence ${stored.id}, revision ${stored.revision} (advisory):\n${stored.findings.slice(0,12000)}${stored.findings.length>12000?"\n[Findings truncated]":""}`;
       }
-      const requestHash=createHash("sha256").update(`${text}\0${behavior||""}${reviewId?`\0${reviewId}`:""}`).digest("hex");
+      const requestHash=createHash("sha256").update(`${text}\0${behavior||""}${reviewId?`\0${reviewId}`:""}${images.length?`\0${createHash("sha256").update(images.map(image=>`${image.mimeType}:${image.data}`).join("\0")).digest("hex")}`:""}`).digest("hex");
       const command=await storage.call<{fresh:boolean;status:string}>("command",{id:commandId,sessionId:req.params.id,kind:"prompt",requestHash,inputText:text,behavior:behavior||null});
       if(!command.fresh)return {accepted:false,status:command.status};
-      const status=await host.prompt(req.params.id,submitted,behavior as "steer"|"followUp"|undefined,commandId,undefined,review,promptAdmission);
+      const status=await host.prompt(req.params.id,submitted,behavior as "steer"|"followUp"|undefined,commandId,undefined,review,promptAdmission,images.map(image=>({type:"image" as const,...image})));
       return {accepted:true,status};
     });
   }catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Prompt rejected"});}
