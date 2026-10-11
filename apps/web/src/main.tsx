@@ -15,6 +15,7 @@ import { Cleanup } from "./Cleanup.js";
 import { Providers } from "./Providers.js";
 import { UpdateButton } from "./UpdateButton.js";
 import { MAX_IMAGES, IMAGE_TYPES, fingerprint, readImages, type Attachment } from "./attachments.js";
+import { createMention, renderMentions } from "./MentionPicker.js";
 import "./style.css";
 
 type Model = { provider:string; id:string; name:string; images:boolean; reasoningLevels?:string[]; legacy?:boolean };
@@ -435,6 +436,7 @@ function App(){
   async function requestCommit(){if(running()||busy())return;const draft=prompt();setPrompt(COMMIT_PROMPT);await send();if(draft.trim()&&!prompt())setPrompt(draft);}
   function insertExample(text:string){setPrompt(text);queueMicrotask(()=>{resize();composer?.focus();});}
   function resize(){if(!composer)return;composer.style.height="auto";composer.style.height=`${Math.min(composer.scrollHeight,window.innerHeight*0.4)}px`;}
+  const welcomeMention=createMention({id:"mention-welcome",scope:()=>workspace()?{cwd:workspace()}:null,el:()=>composer,set:setPrompt,resize}),sessionMention=createMention({id:"mention-session",scope:()=>current()?{session:current()!.id}:null,el:()=>composer,set:setPrompt,resize});
   function clearCurrent(){
     if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}
     ++openGeneration;stream?.close();stream=undefined;
@@ -915,9 +917,9 @@ function App(){
           <form class="composer" classList={{dragging:dragging()}} onSubmit={e=>{e.preventDefault();void create();}} {...dropTarget}>
             <AttachmentStrip/>
             <label for="prompt" class="sr-only">Message to the root agent</label>
-            <textarea id="prompt" ref={composer} value={prompt()} rows="2" onInput={e=>{setPrompt(e.currentTarget.value);resize();}} onPaste={onPasteImages}
-              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void create();}}}
-              placeholder="Describe the task for the root agent…"/>
+            <textarea id="prompt" ref={composer} value={prompt()} rows="2" onInput={e=>{setPrompt(e.currentTarget.value);resize();welcomeMention.sync();}} onPaste={onPasteImages} {...welcomeMention.props}
+              onKeyDown={e=>{if(welcomeMention.keydown(e))return;if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void create();}}}
+              placeholder="Describe the task for the root agent… Type @ to mention files, skills or tools"/>{welcomeMention.view()}
             <div class="composer-foot">
               <div class="composer-tools"><AttachTool id="attach-welcome"/><ModelPicker welcome/></div>
               <div class="composer-actions"><button type="submit" class="send-btn" disabled={busy()||!models().length||!prompt().trim()&&!attachments().length||!!attachments().length&&!imagesAllowed()} aria-label={busy()?"Starting":"Send"}><Icon name="up"/></button></div>
@@ -948,7 +950,7 @@ function App(){
           </Show>
           <For each={graphNode()&&graphNode()!.id!==current()?.id&&!graphHistory()?[]:conversation()!.messages.slice(-shown())}>{m=><Show when={!m.interim}><article class={`msg ${m.role==="user"?"user":"assistant"}`}>
             <div class="msg-author" classList={{"sr-only":m.role==="user"}}>{m.role==="user"?"You":<><Logo class="avatar"/>Sigma<span class="muted">{graphNode()?.role??"root"} agent</span></>}</div>
-            <Show when={m.text||!m.images}><div class="msg-body">{m.text}</div></Show>
+            <Show when={m.text||!m.images}><div class="msg-body">{m.role==="user"?renderMentions(m.text):m.text}</div></Show>
             <Show when={m.images}><div class="msg-images"><Icon name="image"/>{m.images} image{m.images===1?"":"s"}</div></Show>
           </article><Show when={m.role==="user"&&(m.work||workLive()&&m.id===lastUserId())}><WorkBlock id={m.id} work={m.work} at={m.at} live={workLive()&&m.id===lastUserId()}/></Show></Show>}</For>
           <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body">{draft()}<span class="caret" aria-hidden="true"/></div></article></Show>
@@ -983,9 +985,9 @@ function App(){
         <form class="composer" classList={{running:running(),dragging:dragging()}} onSubmit={e=>{e.preventDefault();void send();}} {...dropTarget}>
           <AttachmentStrip/>
           <label for="prompt" class="sr-only">{running()?"Queue a follow-up message":"Message to the root agent"}</label>
-          <textarea id="prompt" ref={composer} value={prompt()} rows="2" disabled={taskUnresolved()} onInput={e=>{setPrompt(e.currentTarget.value);resize();}} onPaste={onPasteImages}
-            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void send();}}}
-            placeholder={running()?"Queue a follow-up — delivered after the current turn…":"Describe the task for the root agent…"}/>
+          <textarea id="prompt" ref={composer} value={prompt()} rows="2" disabled={taskUnresolved()} onInput={e=>{setPrompt(e.currentTarget.value);resize();sessionMention.sync();}} onPaste={onPasteImages} {...sessionMention.props}
+            onKeyDown={e=>{if(sessionMention.keydown(e))return;if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();void send();}}}
+            placeholder={running()?"Queue a follow-up — delivered after the current turn… Type @ to mention":"Describe the task for the root agent… Type @ to mention files, skills or tools"}/>{sessionMention.view()}
           <div class="composer-foot">
             <div class="composer-tools">
               <AttachTool id="attach-session" disabled={taskUnresolved()}/>

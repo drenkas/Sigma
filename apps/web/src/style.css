@@ -326,8 +326,17 @@ select.input option{background:var(--surface-2)}
 .approval-path{color:var(--text);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .approval-actions{display:flex;gap:var(--s2);flex:none}
 .recovery-strip{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s3);padding:var(--s2) var(--s3);border:1px solid var(--unk-border);background:var(--unk-bg);border-radius:var(--r-lg);font-size:13px;color:var(--unk-text)}
-.composer{border:1px solid var(--border-strong);background:var(--surface-2);border-radius:var(--r-xl);box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
+.composer{position:relative;border:1px solid var(--border-strong);background:var(--surface-2);border-radius:var(--r-xl);box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
 .composer:focus-within{border-color:var(--border-hover)}
+.mention-pop{position:absolute;z-index:30;left:0;right:0;bottom:calc(100% + var(--s2));background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--r);box-shadow:var(--shadow);padding:4px}
+.mention-list{max-height:min(320px,40vh);overflow-y:auto;overscroll-behavior:contain}
+.mention-group{padding:6px var(--s3) 2px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
+.mention-opt{display:flex;align-items:baseline;gap:var(--s3);padding:6px var(--s3);border-radius:var(--r-sm);font-size:13px;cursor:pointer}
+.mention-opt.active{background:var(--hover)}
+.mention-name{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.mention-detail{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:12px}
+.mention-empty{padding:var(--s2) var(--s3);font-size:13px;color:var(--text-3)}
+.mention{border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent-strong);padding:0 3px}
 .composer.running{border-color:var(--run-border)}
 .composer textarea{display:block;width:100%;min-height:56px;max-height:40vh;resize:none;border:0;outline:0;background:transparent;padding:14px var(--s4) var(--s1);font-size:14.5px;line-height:1.5}
 .composer textarea::placeholder{color:var(--text-3)}

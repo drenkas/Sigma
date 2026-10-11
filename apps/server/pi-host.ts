@@ -18,6 +18,7 @@ import { sweepCrashTemps } from "./crash-temps.js";
 import { formatShellResult, killAllShells, protectedRoots, runShell, sandboxAvailable, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } from "./shell-tool.js";
 import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch } from "./git-actions.js";
 import { prepareCommit, executeCommit, gitIdentity, dispatchGit, inspectGit, finalizeGit, type GitIntent } from "./git-intents.js";
+import { stripMentionContext, type MentionTool } from "./mentions.js";
 import { defaultRoles, normalizeRoles, roleInput, resolveRole } from "./roles.js";
 import { NativeCli, NATIVE_PROVIDER_IDS, AGY_UNSUPERVISED_PROVIDER_ID, CLAUDE_PROVIDER_ID } from "./native-cli.js";
 import { registerAgyUnsupervisedProvider } from "./agy-provider.js";
@@ -114,7 +115,7 @@ export function visibleMessages(session:AgentSession,cwd:string):SessionView["me
   (session.messages as any[]).forEach((message,index)=>{
     const at=typeof message.timestamp==="number"?message.timestamp:undefined;
     if(message.role==="user"){
-      close();const text=typeof message.content==="string"?message.content:message.content.filter((part:any)=>part.type==="text").map((part:any)=>part.text).join("");
+      close();const text=stripMentionContext(typeof message.content==="string"?message.content:message.content.filter((part:any)=>part.type==="text").map((part:any)=>part.text).join(""));
       const images=typeof message.content==="string"?0:message.content.filter((part:any)=>part.type==="image").length;
       if(!text&&!images)return;owner={id:String(index),role:"user",text,...(images?{images}:{}),...(at!==undefined?{at}:{})};out.push(owner);turn={startedAt:at??0,endedAt:at??0,steps:[]};return;
     }
@@ -1044,6 +1045,12 @@ export class PiHost {
     const agents=(await this.storage.call<Array<RecordRow&{revisionReviewer:boolean}>>("agents",{rootId:id})).map((item):AgentView=>({id:item.id,parentId:item.parentId,role:item.role,status:item.status,model:item.model,cwd:item.cwd,revisionReviewer:item.revisionReviewer}));
     const messages=visibleMessages(session,row.cwd),[recoveryInputs,recoveryActions]=await Promise.all([this.storage.call<RecoveryInput[]>("recoveryInputs",{sessionId:id}),this.storage.call<RecoveryAction[]>("recoveryActions",{sessionId:id})]);
     return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status,cursor,agents,approvals,recoveryInputs,recoveryActions,messages,archivedAt:await this.storage.call<number|null>("ownerArchivedAt",{id})};
+  }
+  /** Working folder, active tools and protected roots that @-mentions may not reach, for one open session. */
+  async mentionContext(id:string){
+    const {session,row}=await this.get(id),active=new Set(session.getActiveToolNames());
+    const tools=session.getAllTools().filter(tool=>active.has(tool.name)).map((tool):MentionTool=>({name:tool.name,description:String(tool.description??"").split("\n")[0].slice(0,160)}));
+    return {cwd:row.cwd,tools,deny:[this.dataDir,getAgentDir()]};
   }
   async childSnapshot(rootId:string,childId:string){
     await this.storage.call("descendantMember",{rootId,agentId:childId});

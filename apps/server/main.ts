@@ -1,8 +1,8 @@
 import { Cleanup } from "./cleanup.js";
 import Fastify from "fastify";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiHost } from "./pi-host.js";
 import { Verification } from "./verification.js";
@@ -21,6 +21,7 @@ import { proxyEnabled, writeProxyEnabled } from "./cliproxy-provision.js";
 import { PINNED_BINARY_NAME } from "./cliproxy-config.mjs";
 import { DataLease } from "./data-lease.js";
 import { createScratchDir } from "./scratch.js";
+import { expandMentions, listSkills, searchMentions } from "./mentions.js";
 import { defaultStageRoot, startupMigration } from "./legacy-migration.js";
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"../..");
@@ -415,6 +416,21 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/reviews",async(req,reply)=>{
 app.post<{Params:{id:string;reviewId:string}}>("/api/sessions/:id/reviews/:reviewId/abort",async(req,reply)=>{
   try{await verification.abortReview(req.params.id,req.params.reviewId);return {stopped:true};}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Reviewer stop failed"});}
 });
+// Picker data for @-mentions: project files, skills and the live session's tools. Skills also come from the Pi agent folder.
+app.get<{Querystring:{session?:string;cwd?:string;q?:string}}>("/api/mentions",async(req,reply)=>{
+  reply.header("Cache-Control","no-store");
+  const {session,cwd,q=""}=req.query;
+  if(typeof q!=="string"||q.length>200)return reply.code(400).send({error:"Query too long"});
+  try{
+    if(typeof session==="string"&&session){
+      if(!isUUID(session))return reply.code(400).send({error:"Valid session ID required"});
+      const context=await host.mentionContext(session);
+      return await searchMentions(q,{...context,skills:await listSkills(context.cwd,[join(dataDir,"agent","skills")])});
+    }
+    if(typeof cwd!=="string"||!isAbsolute(cwd)||!statSync(cwd).isDirectory())return reply.code(400).send({error:"Session or an existing absolute folder required"});
+    return await searchMentions(q,{cwd,deny:[dataDir],skills:await listSkills(cwd,[join(dataDir,"agent","skills")])});
+  }catch{return reply.code(404).send({error:"Mentions unavailable"});}
+});
 const IMAGE_TYPES=new Set(["image/png","image/jpeg","image/gif","image/webp"]);
 function promptImages(value:unknown):{mimeType:string;data:string}[]|undefined{
   if(value===undefined)return [];
@@ -477,6 +493,7 @@ app.post<{Params:{id:string}}>("/api/sessions/:id/prompt",{bodyLimit:32*1024*102
       const requestHash=createHash("sha256").update(`${text}\0${behavior||""}${reviewId?`\0${reviewId}`:""}${images.length?`\0${createHash("sha256").update(images.map(image=>`${image.mimeType}:${image.data}`).join("\0")).digest("hex")}`:""}`).digest("hex");
       const command=await storage.call<{fresh:boolean;status:string}>("command",{id:commandId,sessionId:req.params.id,kind:"prompt",requestHash,inputText:text,behavior:behavior||null});
       if(!command.fresh)return {accepted:false,status:command.status};
+      if(!review)submitted=await host.mentionContext(req.params.id).then(async context=>expandMentions(text,{...context,skills:await listSkills(context.cwd,[join(dataDir,"agent","skills")])})).catch(()=>text);
       const status=await host.prompt(req.params.id,submitted,behavior as "steer"|"followUp"|undefined,commandId,undefined,review,promptAdmission,images.map(image=>({type:"image" as const,...image})));
       return {accepted:true,status};
     });
