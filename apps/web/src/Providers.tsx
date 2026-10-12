@@ -130,7 +130,7 @@ export function Providers(p:{menu:JSX.Element;pending:number;onClose:()=>void;on
     <Show when={p.pending}><div class="banner warning" role="status">A chat is waiting for approval.<button class="link-btn" onClick={p.onClose}>Review in chat</button></div></Show>
     <div class="scroller"><div class="project-content provider-page">
       <section class="provider-section"><h2 class="repo-name">Agent access</h2>
-      <label class="field"><input type="checkbox" checked={access()==="full"} disabled={accessBusy()} onChange={event=>void setMode(event.currentTarget.checked?"full":"ask")}/> <span>Full access — agents run tools without asking</span></label>
+      <label class="field check"><input type="checkbox" checked={access()==="full"} disabled={accessBusy()} onChange={event=>void setMode(event.currentTarget.checked?"full":"ask")}/> <span>Full access — agents run tools without asking</span></label>
       <p class="field-help">Uncheck to restore Allow/Deny prompts for every read, edit, write, commit and QA action.</p></section>
       <Show when={error()}><p class="banner error" role="alert">{error()}</p></Show>
       <section class="provider-section">
@@ -178,7 +178,7 @@ export function Providers(p:{menu:JSX.Element;pending:number;onClose:()=>void;on
             <p class="field-help" role="status">{provider.enabled?"Enabled":"Off"} · {provider.message}</p>
             <p class="field-help">Only available for new code sessions in an isolated Git worktree, never direct-folder or read-only chats, and never for delegated child agents. Its file, shell and browser activity is shown read-only as “executed by AGY (unsupervised)”.</p>
             <Show when={!provider.enabled}>
-              <label class="field"><input type="checkbox" checked={understood()} onChange={event=>setUnderstood(event.currentTarget.checked)}/> <span>I understand AGY runs its own tools without Sigma approvals.</span></label>
+              <label class="field check"><input type="checkbox" checked={understood()} onChange={event=>setUnderstood(event.currentTarget.checked)}/> <span>I understand AGY runs its own tools without Sigma approvals.</span></label>
             </Show>
             <div class="project-actions">
               <Show when={!provider.enabled}><button class="btn primary sm" disabled={!understood()||!!nativeBusy().length||!!busy().length||provider.state==="missing"||provider.state==="blocked"} onClick={()=>void unsupervisedAction("enable")}>Enable unsupervised Antigravity</button></Show>
@@ -189,7 +189,7 @@ export function Providers(p:{menu:JSX.Element;pending:number;onClose:()=>void;on
       </section>
       <section class="provider-section">
         <h2 class="repo-name">Local model gateways</h2>
-        <Show when={cliproxy()} fallback={<p class="field-help">Loading local proxy status…</p>}>{provider=><div class="provider-list"><Row k="proxy" name={provider().name} forced={cliproxyBusy()} tone={proxyTone(provider())} pill={provider().connected?"Connected":provider().state.replaceAll("_"," ")} sub={provider().connected?`${provider().modelCount} catalog models`:provider().proxy?`${provider().proxy!.state.replaceAll("_"," ")} · ${provider().proxy!.reason}`:provider().message}>
+        <Show when={cliproxy()} fallback={<p class="field-help">Loading local proxy status…</p>}>{provider=><div class="provider-list"><Row k="proxy" name={provider().name} forced={cliproxyBusy()} tone={proxyTone(provider())} pill={provider().connected?"Connected":provider().proxy?.state==="not_installed"?"Missing":provider().state.replaceAll("_"," ")} sub={provider().connected?`${provider().modelCount} catalog models`:provider().proxy?`${provider().proxy!.state.replaceAll("_"," ")} · ${provider().proxy!.reason}`:provider().message}>
           <p class="field-help" role="status">{provider().state.replaceAll("_"," ")}{provider().connected?` · ${provider().modelCount} catalog models`:""}</p>
           <Show when={provider().proxy}>{proxy=><p class="field-help" role="status" data-proxy-state={proxy().state}>Proxy process: {proxy().state.replaceAll("_"," ")} · {proxy().reason}</p>}</Show>
           <p class="field-help">{provider().message}</p>
