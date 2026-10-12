@@ -233,6 +233,25 @@ function App(){
   const opening=()=>{const id=loadingId();return !!id&&current()?.id!==id;};
   const detailsBreakpoint=matchMedia("(max-width: 1279px)"),navBreakpoint=matchMedia("(max-width: 899px)");
   const overlayDetails=()=>detailsBreakpoint.matches,overlayNav=()=>navBreakpoint.matches;
+  // Resizable details panel: user width wins over defaults, persisted per viewer, clamped on every render.
+  const DETAILS_MIN=300,SIDE_W=268,CHAT_RESERVE=420;
+  const readDetailsW=()=>{try{const n=Number(localStorage.getItem("sigma-details-w"));return Number.isFinite(n)&&n>=DETAILS_MIN?n:null;}catch{return null;}};
+  const [detailsW,setDetailsW]=createSignal<number|null>(readDetailsW()),[vw,setVw]=createSignal(window.innerWidth),[resizing,setResizing]=createSignal(false);
+  const onWinResize=()=>setVw(window.innerWidth);window.addEventListener("resize",onWinResize);onCleanup(()=>window.removeEventListener("resize",onWinResize));
+  const detailsMax=()=>{const v=vw();return Math.max(DETAILS_MIN,Math.min(900,v<1280?v:v-(v>=900&&!navCollapsed()?SIDE_W:0)-CHAT_RESERVE));};
+  const clampDetailsW=(w:number)=>Math.round(Math.min(detailsMax(),Math.max(DETAILS_MIN,w)));
+  const detailsNow=()=>{const w=detailsW();return w==null?Math.round(detailsPanel?.getBoundingClientRect().width??368):clampDetailsW(w);};
+  const saveDetailsW=(w:number|null)=>{setDetailsW(w);try{if(w==null)localStorage.removeItem("sigma-details-w");else localStorage.setItem("sigma-details-w",String(w));}catch{/* per-viewer convenience only */}};
+  let resizeDrag:{x:number;w:number}|undefined;
+  function resizeDown(e:PointerEvent){if(e.button!==0)return;e.preventDefault();(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);resizeDrag={x:e.clientX,w:detailsNow()};setResizing(true);document.body.style.userSelect="none";}
+  function resizeMove(e:PointerEvent){if(resizeDrag)setDetailsW(clampDetailsW(resizeDrag.w+resizeDrag.x-e.clientX));}
+  function resizeUp(){if(!resizeDrag)return;resizeDrag=undefined;setResizing(false);document.body.style.userSelect="";const w=detailsW();if(w!=null)saveDetailsW(clampDetailsW(w));}
+  function resizeKey(e:KeyboardEvent){
+    const step=e.shiftKey?64:16,w=detailsNow();let n:number|null|undefined;
+    if(e.key==="ArrowLeft")n=clampDetailsW(w+step);else if(e.key==="ArrowRight")n=clampDetailsW(w-step);else if(e.key==="Home")n=DETAILS_MIN;else if(e.key==="End")n=detailsMax();else if(e.key==="Enter")n=null;
+    if(n===undefined)return;e.preventDefault();saveDetailsW(n);
+  }
+  onCleanup(()=>{document.body.style.userSelect="";});
 
   async function refresh(){const data=await api<{sessions:Listed[]}>("/sessions");setSessions(data.sessions);}
   async function refreshTasks(){const data=await api<{tasks:ProjectTaskView[]}>("/project-tasks");setProjectTasks(data.tasks);}
@@ -719,6 +738,7 @@ function App(){
     setDetailTab(DETAIL_TABS[next].id);document.getElementById(`tab-${DETAIL_TABS[next].id}`)?.focus();
   }
   const Details=()=><aside id="details" ref={detailsPanel} class="details" aria-label="Session details">
+    <div class="details-resize" classList={{dragging:resizing()}} role="separator" aria-orientation="vertical" aria-label="Resize details panel" tabindex="0" aria-valuenow={detailsNow()} aria-valuemin={DETAILS_MIN} aria-valuemax={detailsMax()} onPointerDown={resizeDown} onPointerMove={resizeMove} onPointerUp={resizeUp} onPointerCancel={resizeUp} onLostPointerCapture={resizeUp} onKeyDown={resizeKey} onDblClick={()=>saveDetailsW(null)}/>
     <div class="col-head details-head">
       <h2 ref={detailsTitle} class="sr-only" tabindex="-1">Session details</h2>
       <div class="tabs" role="tablist" aria-label="Session details" onKeyDown={tabKeys}>
@@ -1016,7 +1036,7 @@ function App(){
     </Show>
   </main>;
 
-  return <div class="shell" classList={{"nav-open":navOpen(),"nav-collapsed":navCollapsed(),"details-collapsed":detailsCollapsed(),"details-open":detailsOpen(),"projects-view":showProjects()||showRoles()||showProviders(),composing:composing(),"graph-wide":!showProviders()&&!showRoles()&&!!current()&&detailTab()==="graph"}}>
+  return <div class="shell" classList={{"nav-open":navOpen(),"nav-collapsed":navCollapsed(),"details-collapsed":detailsCollapsed(),"details-open":detailsOpen(),"projects-view":showProjects()||showRoles()||showProviders(),composing:composing(),"graph-wide":!showProviders()&&!showRoles()&&!!current()&&detailTab()==="graph"}} style={detailsW()==null?undefined:{"--details-user-w":`${clampDetailsW(detailsW()!)}px`}}>
     <a class="skip" href={showProviders()?"#providers-title":showRoles()?"#roles-title":showProjects()?"#projects-title":"#prompt"}>{showProviders()?"Skip to providers":showRoles()?"Skip to agents":showProjects()?"Skip to projects":"Skip to composer"}</a>
     <Sidebar/>
     <Show when={showProviders()} fallback={<>

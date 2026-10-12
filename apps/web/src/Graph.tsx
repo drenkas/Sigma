@@ -141,7 +141,7 @@ export function Graph(p:{id:string;active:boolean;selected:string|null;waiting?:
       <div class="graph-meter" aria-hidden="true">
         <For each={["settled","running","idle","interrupted","error"]}>{status=><Show when={counts()[status]}><span class={`seg seg-${status}`} style={{flex:counts()[status]}}/></Show>}</For>
       </div>
-      <div ref={viewport} class="graph-viewport" tabindex="0" role="region" aria-label="Graph canvas. Arrow keys pan; Tab or arrow keys on a chat move between chats."
+      <div ref={el=>{viewport=el;const ro=new ResizeObserver(()=>{if(!moved&&el.clientWidth>0)fit();});ro.observe(el);onCleanup(()=>ro.disconnect());}} class="graph-viewport" tabindex="0" role="region" aria-label="Graph canvas. Arrow keys pan; Tab or arrow keys on a chat move between chats."
         style={{height:`min(62vh, ${Math.round(height()*zoom()+16)}px)`}}
         onKeyDown={e=>{if(e.target!==e.currentTarget)return;const delta=40;if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)){e.preventDefault();moved=true;setOffset(old=>({x:old.x+(e.key==="ArrowLeft"?delta:e.key==="ArrowRight"?-delta:0),y:old.y+(e.key==="ArrowUp"?delta:e.key==="ArrowDown"?-delta:0)}));}}}
         onPointerDown={e=>{if((e.target as Element).closest("button"))return;drag={x:e.clientX,y:e.clientY,ox:offset().x,oy:offset().y};e.currentTarget.setPointerCapture(e.pointerId);}}
