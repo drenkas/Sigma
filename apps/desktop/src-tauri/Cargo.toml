@@ -12,3 +12,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+
+# macOS 27 dyld rejects stripped proc-macro dylibs ("mis-aligned LINKEDIT string pool"), so keep them unstripped.
+[profile.release.build-override]
+strip = "none"
+debug = false
