@@ -721,7 +721,7 @@ function App(){
       <button class="icon-btn drawer-close only-details" onClick={()=>closeDetails()} aria-label="Close session details"><Icon name="close"/></button>
     </div>
     <div class="details-body">
-      <Show when={current()} fallback={<p class="muted pad">Open a session to see its changes, repository, agents and tool activity.</p>}>
+      <Show when={current()} fallback={<p class="muted pad">Start or open a session to see its changes, repository, agents and tool activity.</p>}>
         <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" class="tab-panel" hidden={detailTab()!=="overview"}>
           <section class="panel" aria-labelledby="h-summary">
             <h3 id="h-summary" class="panel-title">Summary</h3>
@@ -888,8 +888,8 @@ function App(){
       </div>
       <Show when={current()}><RunBadge status={graphHistory()?.status??current()!.status}/></Show>
       <Show when={current()?.policy?.unsupervised}><span class="badge unsupervised" role="note" title={AGY_WARNING}>Unsupervised AGY</span></Show>
-      <Show when={detailsCollapsed()&&!composing()}><button class="icon-btn dock-details dock-details-show" onClick={toggleDetailsCollapsed} aria-label="Show details" title="Show details" aria-controls="details" aria-expanded="false"><Icon name="panel"/></button></Show>
-      <button class="btn ghost sm only-details details-toggle" onClick={()=>openDetails()} aria-label="Session details" aria-describedby={attention()?"details-attention":undefined} aria-controls="details" aria-expanded={detailsOpen()} disabled={!current()}>
+      <Show when={detailsCollapsed()}><button class="icon-btn dock-details dock-details-show" onClick={toggleDetailsCollapsed} aria-label="Show details" title="Show details" aria-controls="details" aria-expanded="false"><Icon name="panel"/></button></Show>
+      <button class="btn ghost sm only-details details-toggle" onClick={()=>openDetails()} aria-label="Session details" aria-describedby={attention()?"details-attention":undefined} aria-controls="details" aria-expanded={detailsOpen()}>
         <Icon name="panel"/><span class="hide-xs">Details</span><Show when={attention()}><span id="details-attention" class="pip" aria-label={`Attention: ${attention()} item${attention()===1?"":"s"}`}>{attention()}</span></Show>
       </button>
     </header>
