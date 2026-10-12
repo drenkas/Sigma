@@ -5,6 +5,7 @@ import { chmod, mkdir, readFile, writeFile, symlink, link, stat } from "node:fs/
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { PiHost } from "./pi-host.js";
+import { mutationTools } from "./editing.js";
 import { SourceApply } from "./source-apply.js";
 import { Storage } from "./storage.js";
 import { Verification } from "./verification.js";
@@ -121,4 +122,19 @@ test("direct Code approvals preserve unrelated Git state and stop at HEAD drift 
     assert.equal((await host.snapshot(second)).approvals.length,0,"An unresolved direct write blocks another session in the same folder");
     await assert.rejects(stat(join(source,"after-uncertain.txt")));
   }finally{await apply.close();await verification.close();await host.close();await storage.close();}
+});
+
+test("edit and write run sequentially so parallel calls in one turn never see each other's applying approval",async()=>{
+  const source=join(fixture,"seq-source"),data=join(fixture,"seq-data");await mkdir(source,{recursive:true});await mkdir(data);
+  await git(source,"init","-b","main");await writeFile(join(source,"a.txt"),"a\n");await git(source,"add",".");await git(source,"commit","-m","Fixture");
+  const storage=new Storage(join(data,"state.sqlite")),host=new PiHost(storage,data,async()=>{});await host.init();
+  try{
+    const sid=await host.create(source,"sigma-demo/offline",crypto.randomUUID(),"code"),session=(host as any).active.get(sid).session;
+    const direct=mutationTools(source,async()=>null,async()=>{},()=>false);
+    assert.deepEqual(direct.map(tool=>[tool.name,tool.executionMode]),[["edit","sequential"],["write","sequential"]]);
+    for(const name of ["edit","write"]){
+      assert.equal(session.getToolDefinition(name).executionMode,"sequential",`${name} definition keeps its execution mode through Pi registration`);
+      assert.equal(session.agent.state.tools.find((tool:any)=>tool.name===name).executionMode,"sequential",`${name} agent tool makes the whole batch sequential`);
+    }
+  }finally{await host.close();await storage.close();}
 });

@@ -141,7 +141,8 @@ type Outcome=(id:string,outcome:WriteOutcome)=>Promise<void>;
 export function mutationTools(cwd:string,approve:Approve,outcome:Outcome,stopped:()=>boolean,applied:(toolCallId:string)=>void=()=>{},beforeMutation:(path:string,approvalId?:string)=>Promise<void>=async()=>{},protectPath:PathGuard=()=>{}):ToolDefinition<any>[]{
   return ["edit","write"].map(tool=>{
     const definition:ToolDefinition<any>=tool==="edit"?defineTool(createEditToolDefinition(cwd)):defineTool(createWriteToolDefinition(cwd));
-    return {...definition,execute:async(...args:Parameters<typeof definition.execute>)=>{
+    // Parallel edits in one turn would see each other's live "applying" approvals as unknown direct-workspace outcomes; run the batch one tool at a time.
+    return {...definition,executionMode:"sequential" as const,execute:async(...args:Parameters<typeof definition.execute>)=>{
       const signal=args[2];let original:ReturnType<typeof snapshot>|undefined;
       const check=()=>{if(signal?.aborted||stopped())throw new Error("Agent stopped");};
       const write=async(path:string,content:string)=>{

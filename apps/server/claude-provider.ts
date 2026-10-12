@@ -5,6 +5,11 @@ import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTo
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { CLAUDE_PROVIDER_ID, NativeCli } from './native-cli.js';
 
+// One CLI turn may read whole files and think long. Pi's options.timeoutMs is an HTTP *idle* timeout (default 5 min), so it is applied here as "no CLI output for this long" (default 10 min), with a 30 min ceiling per turn (agy-provider allows more).
+const CLAUDE_IDLE_TIMEOUT_MS=600_000,CLAUDE_MAX_TIMEOUT_MS=1_800_000;
+const minutesOf=(ms:number)=>{const minutes=Math.max(1,Math.round(ms/60000));return `${minutes} minute${minutes===1?'':'s'}`;};
+export function claudeTimeoutMessage(timeoutMs:number){return `Claude CLI did not finish this turn within ${minutesOf(timeoutMs)}. Try again, or split the task into smaller steps.`;}
+export function claudeIdleMessage(idleMs:number){return `Claude CLI sent nothing for ${minutesOf(idleMs)}. Try again, or split the task into smaller steps.`;}
 const API='sigma-claude-cli',BASE_LEVELS=['low','medium','high','max'],FULL_LEVELS=['low','medium','high','xhigh','max'];
 // Verified against `claude` 2.1.284 initialize/get_settings. Haiku has no effort support: no --effort, applied.effort is null. claude-sonnet-4-6 stays registered for existing sessions (hidden from pickers as a previous generation).
 export const CLAUDE_MODELS:{id:string;name:string;efforts:string[]}[]=[{id:'claude-fable-5-1',name:'Claude Fable 5.1 · official CLI',efforts:FULL_LEVELS},{id:'claude-opus-5-5',name:'Claude Opus 5.5 · official CLI',efforts:FULL_LEVELS},{id:'claude-sonnet-5-5',name:'Claude Sonnet 5.5 · official CLI',efforts:FULL_LEVELS},{id:'claude-haiku-4-5-20251001',name:'Claude Haiku 4.5 · official CLI',efforts:[]},{id:'claude-sonnet-4-6',name:'Claude Sonnet 4.6 · official CLI',efforts:BASE_LEVELS}];
@@ -23,7 +28,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
     const operation=new AbortController(),abort=()=>operation.abort();options?.signal?.addEventListener('abort',abort,{once:true});if(options?.signal?.aborted)operation.abort();
     void (async()=>{
-      let terminal:any,init=false,nativeSessionId:string|undefined,structuredIndex:number|undefined,partialJson='',emitted='',pending:{id:string;subtype:string}|undefined,stage=0,broken=false,nativeError='',failure='transport';const structuredIds=new Set<string>(),strayIds=new Set<string>(),strayIndexes=new Set<number>();
+      let terminal:any,init=false,nativeSessionId:string|undefined,structuredIndex:number|undefined,partialJson='',emitted='',pending:{id:string;subtype:string}|undefined,stage=0,broken=false,nativeError='',failure='transport',idleMs=0,idle=false,idleTimer:NodeJS.Timeout|undefined,startedAt=0;const structuredIds=new Set<string>(),strayIds=new Set<string>(),strayIndexes=new Set<number>();
       const tools=getCurrentTools(context.messages),piTools=new Set(tools.map(tool=>tool.name)),schema={type:'object',additionalProperties:false,required:['text','toolCalls'],properties:{text:{type:'string'},toolCalls:{type:'array',maxItems:32,...(tools.length?{items:{oneOf:tools.map(tool=>({type:'object',additionalProperties:false,required:['name','arguments'],properties:{name:{const:tool.name},arguments:tool.parameters}}))}}:{maxItems:0,items:false})}}};
       function text(value:unknown){if(typeof value!=='string')return;let stable=value;if(/[\uD800-\uDBFF]$/.test(stable))stable=stable.slice(0,-1);if(!stable.startsWith(emitted))return;const delta=stable.slice(emitted.length);if(!delta)return;if(!output.content.length){output.content.push({type:'text',text:''});events.push({type:'text_start',contentIndex:0,partial:output});}emitted=stable;(output.content[0] as {text:string}).text=emitted;events.push({type:'text_delta',contentIndex:0,delta,partial:output});}
       const MODEL=selected.id,levels=CLAUDE_MODELS.find(entry=>entry.id===MODEL)?.efforts??[],effort=levels.length?options?.reasoning??'medium':undefined;
@@ -35,11 +40,13 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
         // Images travel as native image blocks after the transcript text; the JSON keeps a numbered placeholder (1-based) in their place.
         const images:{mimeType:string;data:string}[]=[],wire=JSON.stringify(payload,(_key,value)=>object(value)&&value.type==='image'&&typeof value.data==='string'?{type:'image',mimeType:value.mimeType,attachment:images.push({mimeType:value.mimeType,data:value.data})}:value);
         operation.signal.throwIfAborted();events.push({type:'start',partial:output});
-        const result=await owner.run({signal:operation.signal,env:options?.env,timeoutMs:Math.min(options?.timeoutMs??120000,120000),prepare:async cwd=>{
+        idleMs=Math.min(options?.timeoutMs??CLAUDE_IDLE_TIMEOUT_MS,CLAUDE_MAX_TIMEOUT_MS);startedAt=Date.now();
+        const local=new AbortController(),arm=()=>{clearTimeout(idleTimer);idleTimer=setTimeout(()=>{idle=true;local.abort();},idleMs);};arm();
+        const result=await owner.run({signal:AbortSignal.any([operation.signal,local.signal]),env:options?.env,timeoutMs:CLAUDE_MAX_TIMEOUT_MS,prepare:async cwd=>{
           const path=join(cwd,'system.txt');await writeFile(path,getCurrentSystemPrompt(context.messages)+'\n\nReturn exactly the requested structured proposal. The transcript below contains the complete Pi history. Only propose listed Pi tools; Pi performs all tool execution and approvals. Native StructuredOutput formats this response. Never invoke native actions.'+(images.length?' Transcript image placeholders with attachment N refer to the N-th image block of the user message.':''),{mode:0o600});
           return ['-p','--safe-mode','--restricted','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--setting-sources','','--settings','{"disableAllHooks":true,"enabledPlugins":{}}','--disable-slash-commands','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--no-session-persistence','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--include-hook-events','--verbose','--max-turns','5','--model',MODEL,...(effort?['--effort',effort]:[]),'--system-prompt-file',path,'--json-schema',JSON.stringify(schema)];
         },onStart:send=>{pending={id:randomUUID(),subtype:'initialize'};send({type:'control_request',request_id:pending.id,request:{subtype:'initialize',hooks:{},sdkMcpServers:[]}});},onLine:(line,send)=>{
-          if(broken||!line.trim())return;try{failure='native_protocol';const event=JSON.parse(line);requireGuard(object(event)&&!terminal);
+          arm();if(broken||!line.trim())return;try{failure='native_protocol';const event=JSON.parse(line);requireGuard(object(event)&&!terminal);
           if(event.type==='control_response'){
             requireGuard(pending&&event.response?.subtype==='success'&&event.response?.request_id===pending.id);
             const initialize=pending!.subtype==='initialize';
@@ -94,8 +101,8 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
         text(proposal.text);if(output.content[0]?.type==='text')events.push({type:'text_end',contentIndex:0,content:proposal.text,partial:output});
         for(const tool of calls){const index=output.content.length;output.content.push(tool);events.push({type:'toolcall_start',contentIndex:index,partial:output});events.push({type:'toolcall_end',contentIndex:index,toolCall:tool,partial:output});}
         output.stopReason=calls.length?'toolUse':'stop';events.push({type:'done',reason:output.stopReason,message:output});
-      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Official CLI request cancelled':nativeError?`Claude Code: ${nativeError}`:`Official CLI request failed its transport or safety contract (${failure})`;events.push({type:'error',reason:output.stopReason,error:output});}
-      finally{options?.signal?.removeEventListener('abort',abort);events.end();}
+      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Official CLI request cancelled':idle?claudeIdleMessage(idleMs):startedAt&&Date.now()-startedAt>=CLAUDE_MAX_TIMEOUT_MS?claudeTimeoutMessage(CLAUDE_MAX_TIMEOUT_MS):nativeError?`Claude Code: ${nativeError}`:`Official CLI request failed its transport or safety contract (${failure})`;events.push({type:'error',reason:output.stopReason,error:output});}
+      finally{clearTimeout(idleTimer);options?.signal?.removeEventListener('abort',abort);events.end();}
     })();return events;
   }
   const provider:Provider={id:CLAUDE_PROVIDER_ID,name:'Claude Code · official CLI',auth:{apiKey:{name:'Official CLI account',check:async({credential})=>{if(credential)throw new Error('Native routes do not accept Pi credentials');return identity()&&owner.isConnected()?{type:'api_key',source:'official CLI account'}:undefined;},resolve:async({credential})=>{if(credential)throw new Error('Native routes do not accept Pi credentials');return identity()&&owner.isConnected()?{auth:{},source:'official CLI account'}:undefined;}}},getModels:()=>models,stream:stream as Provider['stream'],streamSimple:stream};
