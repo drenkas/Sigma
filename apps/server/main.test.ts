@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Storage } from "./storage.js";
-import { PiHost } from "./pi-host.js";
+import { PiHost, visibleMessages } from "./pi-host.js";
 import { registerDemoProvider } from "./demo-provider.js";
 import { chromiumPath } from "./qa-browser.js";
 import { syntheticChromeBinary } from "./chrome-test-fixture.js";
@@ -469,6 +469,13 @@ PiHost.prototype.init=async function(){await original.call(this);this.runtime.re
   }finally{await stop(child);}
 });
 
+test("a stopped run reports the time up to when its last message was saved, not when it started streaming",()=>{
+  const user={role:"user",content:"think hard",timestamp:1_000},stopped={role:"assistant",content:[{type:"thinking",thinking:"hmm"}],stopReason:"aborted",timestamp:1_050};
+  const session={messages:[user,stopped],sessionManager:{getEntries:()=>[{type:"message",message:user,timestamp:new Date(1_000).toISOString()},{type:"message",message:stopped,timestamp:new Date(13_000).toISOString()}]}};
+  const [owner]=visibleMessages(session as any,"/tmp");assert.equal(owner.work?.endedAt,13_000);assert.equal(owner.work!.endedAt-owner.work!.startedAt,12_000);
+  assert.equal(visibleMessages({messages:[user,stopped]} as any,"/tmp")[0].work?.endedAt,1_050,"Without saved entries the message timestamp is the fallback");
+});
+
 test("prompt images are validated, need an image-capable model and are not stored in commands",async()=>{
   const dataDir=join(testRoot,"prompt-images"),preload=join(dataDir,"vision-preload.mjs");await mkdir(dataDir,{recursive:true});
   await writeFile(preload,`import { isMainThread } from 'node:worker_threads';
@@ -494,6 +501,14 @@ PiHost.prototype.init=async function(){await original.call(this);const runtime=t
     assert.equal((await send(visionId,{text:"",images:[png]},command)).data.accepted,false,"Same command and images replay");
     assert.equal((await send(visionId,{text:"",images:[{...png,data:Buffer.from("other").toString("base64")}]},command)).status,409,"Different images cannot reuse a command ID");
     assert.ok(!JSON.stringify(await req(`/sessions/${visionId}`)).includes(png.data),"Image data never reaches the client");
+    const raw=(path:string,headers:Record<string,string>={Cookie:cookie})=>fetch(`${origin}/api${path}`,{headers:{Origin:origin,...headers}}),history=(await req(`/sessions/${visionId}`)).data.messages as Array<{id:string;role:string}>;
+    const served=await raw(`/sessions/${visionId}/messages/${history[0].id}/images/0`);
+    assert.equal(served.status,200);assert.equal(served.headers.get("content-type"),"image/png");assert.match(served.headers.get("cache-control")??"",/private/);assert.deepEqual(Buffer.from(await served.arrayBuffer()),Buffer.from(png.data,"base64"),"The stored image is served byte for byte");
+    for(const path of [`/sessions/${visionId}/messages/${history[0].id}/images/1`,`/sessions/${visionId}/messages/${history[1].id}/images/0`,`/sessions/${visionId}/messages/abc/images/0`,`/sessions/${visionId}/messages/${history[0].id}/images/x`,`/sessions/${textId}/messages/0/images/0`,`/sessions/${crypto.randomUUID()}/messages/0/images/0`])assert.equal((await raw(path)).status,404,`No image at ${path}`);
+    assert.equal((await raw(`/sessions/${visionId}/messages/${history[0].id}/images/0`,{})).status,401,"The image route needs the session cookie");
+    const picker=await req(`/mentions?cwd=${encodeURIComponent(root)}&q=`),names=(picker.data.tools as Array<{name:string;description:string}>).map(tool=>tool.name);
+    for(const name of ["read","ls","edit","write","bash","delegate","browser_screenshot"])assert.ok(names.includes(name),`The new-session @-picker offers ${name}`);
+    assert.ok(!names.includes("git_commit")&&(picker.data.tools as Array<{description:string}>).every(tool=>tool.description),"Only tools a new session has, each described");
   }finally{await stop(child);}
 });
 

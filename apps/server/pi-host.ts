@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type, getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
-import { CODE_PROFILE, REPOSITORY_CODE_PROFILE, MULTI_REPO_PROFILE, READ_ONLY_PROFILE, NESTED_READ_PROFILE, NESTED_CODE_PROFILE, NESTED_REPOSITORY_PROFILE, NESTED_PARALLEL_PROFILE, NESTED_PARALLEL_WORKTREE_PROFILE, NESTED_WORKER_PROFILE, REVIEW_PROFILE, type FileChange, type WriteOutcome, type WriteRecoveryView, type WriteRecoveryState, type SessionMode, type WorkspaceMode, type AgentView, type ApprovalView, type RecoveryInput, type RecoveryAction, type SessionPolicy, type SessionView, type ProjectTaskView, type RunMetadata, type GraphFact } from "../../packages/contracts/index.js";
+import { CODE_PROFILE, REPOSITORY_CODE_PROFILE, PARALLEL_CODE_PROFILE, MULTI_REPO_PROFILE, READ_ONLY_PROFILE, NESTED_READ_PROFILE, NESTED_CODE_PROFILE, NESTED_REPOSITORY_PROFILE, NESTED_PARALLEL_PROFILE, NESTED_PARALLEL_WORKTREE_PROFILE, NESTED_WORKER_PROFILE, REVIEW_PROFILE, type FileChange, type WriteOutcome, type WriteRecoveryView, type WriteRecoveryState, type SessionMode, type WorkspaceMode, type AgentView, type ApprovalView, type RecoveryInput, type RecoveryAction, type SessionPolicy, type SessionView, type ProjectTaskView, type RunMetadata, type GraphFact } from "../../packages/contracts/index.js";
 import { Storage } from "./storage.js";
 import { registerDemoProvider } from "./demo-provider.js";
 import { assertNotIgnored, assertWorkspaceHead, createCodeWorkspace, describeGitRoot, inspectCodePath, inspectWorkspaceSetup, mutationTools, workspaceChanges } from "./editing.js";
@@ -107,9 +107,13 @@ function readPiHistory(path:string,managerDir:string,managerId:string|null,cwd:s
   return {path:absolute,id:header.id};
 }
 
+const delegateDescription=(profile:{maxDepth:number;childTimeoutMs:number})=>`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${profile.childTimeoutMs/1000}s timeout. Child work is not automatically verified.`;
+
 export function visibleMessages(session:AgentSession,cwd:string):SessionView["messages"] {
   const out:SessionView["messages"]=[],results=new Map<string,boolean>();
   for(const message of session.messages as any[])if(message.role==="toolResult"&&typeof message.toolCallId==="string")results.set(message.toolCallId,!!message.isError);
+  // A message's own timestamp is when it began streaming; the JSONL entry is stamped when it finished, so it gives the real end of a stopped or final reply.
+  const saved=new Map<unknown,number>();try{for(const entry of (session as any).sessionManager?.getEntries?.()??[])if(entry?.type==="message"){const t=Date.parse(entry.timestamp);if(Number.isFinite(t))saved.set(entry.message,t);}}catch{}
   let turn:{startedAt:number;endedAt:number;steps:WorkStep[]}|undefined,owner:SessionView["messages"][number]|undefined;
   const close=()=>{if(turn&&owner&&turn.steps.length)owner.work={...turn,steps:turn.steps.slice(-200)};turn=owner=undefined;};
   (session.messages as any[]).forEach((message,index)=>{
@@ -120,7 +124,7 @@ export function visibleMessages(session:AgentSession,cwd:string):SessionView["me
       if(!text&&!images)return;owner={id:String(index),role:"user",text,...(images?{images}:{}),...(at!==undefined?{at}:{})};out.push(owner);turn={startedAt:at??0,endedAt:at??0,steps:[]};return;
     }
     if(message.role!=="assistant"&&message.role!=="toolResult")return;
-    if(turn&&at!==undefined)turn.endedAt=Math.max(turn.endedAt,at);
+    if(turn)turn.endedAt=Math.max(turn.endedAt,at??0,saved.get(message)??0);
     if(message.role==="toolResult")return;
     const parts:any[]=Array.isArray(message.content)?message.content:[],text=parts.filter(part=>part.type==="text").map(part=>part.text).join(""),calls=parts.filter(part=>part.type==="toolCall"),interim=!!text&&calls.length>0;
     if(turn)for(const part of parts){
@@ -388,7 +392,7 @@ export class PiHost {
         }),
       }));
       if(canDelegate)pi.registerTool(defineTool({
-        name:"delegate",label:"Delegate task",description:`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${profile.childTimeoutMs/1000}s timeout. Child work is not automatically verified.`,
+        name:"delegate",label:"Delegate task",description:delegateDescription(profile),
         parameters:Type.Object({role:Type.Union([Type.Literal("planner"),Type.Literal("researcher"),Type.Literal("worker"),Type.Literal("reviewer"),Type.Literal("qa")]),task:Type.String({minLength:1,maxLength:4000})}),
         execute:async(toolCallId,params,signal)=>{
           const agentId=randomUUID();
@@ -1045,6 +1049,18 @@ export class PiHost {
     const agents=(await this.storage.call<Array<RecordRow&{revisionReviewer:boolean}>>("agents",{rootId:id})).map((item):AgentView=>({id:item.id,parentId:item.parentId,role:item.role,status:item.status,model:item.model,cwd:item.cwd,revisionReviewer:item.revisionReviewer}));
     const messages=visibleMessages(session,row.cwd),[recoveryInputs,recoveryActions]=await Promise.all([this.storage.call<RecoveryInput[]>("recoveryInputs",{sessionId:id}),this.storage.call<RecoveryAction[]>("recoveryActions",{sessionId:id})]);
     return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status,cursor,agents,approvals,recoveryInputs,recoveryActions,messages,archivedAt:await this.storage.call<number|null>("ownerArchivedAt",{id})};
+  }
+  /** One image of one user message (the message id from `snapshot`, the 0-based image position); undefined when it does not exist. */
+  async messageImage(id:string,messageId:string,position:number):Promise<{mimeType:string;data:Buffer}|undefined>{
+    const {session}=await this.get(id),message=/^\d+$/.test(messageId)?(session.messages as any[])[Number(messageId)]:undefined;
+    if(message?.role!=="user"||!Array.isArray(message.content))return;
+    const part=message.content.filter((item:any)=>item?.type==="image")[position];
+    return part&&typeof part.mimeType==="string"&&typeof part.data==="string"?{mimeType:part.mimeType,data:Buffer.from(part.data,"base64")}:undefined;
+  }
+  /** Tools a new root session (parallel mode, as the new-session screen creates) would get, for the @-picker before a session exists. */
+  newSessionTools(cwd:string):MentionTool[]{
+    const allow=async()=>true,defs:Array<{name:string;description?:string}>=[...inspectionTools(cwd,this.protectPath,allow,()=>false),...mutationTools(cwd,allow as any,async()=>{},()=>false),this.bashTool({cwd} as RecordRow),{name:"delegate",description:delegateDescription(PARALLEL_CODE_PROFILE)},...this.browserUse?this.browserUse.tools("",()=>true,allow):[]];
+    return defs.map((tool):MentionTool=>({name:tool.name,description:String(tool.description??"").split("\n")[0].slice(0,160)}));
   }
   /** Working folder, active tools and protected roots that @-mentions may not reach, for one open session. */
   async mentionContext(id:string){

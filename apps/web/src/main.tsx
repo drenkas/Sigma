@@ -48,6 +48,8 @@ const humanError=(text:string,path="")=>{
 const modelName=(model:string)=>model.split("/").slice(1).join("/")||model;
 const base=(path:string)=>path.split("/").filter(Boolean).pop()||path||"Workspace";
 const short=(id:string)=>id.slice(0,8);
+/** Titles show `@"my dir/a.md"` mention tokens as `@my dir/a.md`. */
+const plainMentions=(text:string)=>text.replace(/(?<!\S)@"([^"\n]+)"/g,"@$1");
 const firstLine=(text:string,max=72)=>{const line=text.trim().split("\n")[0];return line.length>max?`${line.slice(0,max-1)}…`:line;};
 const message=(e:unknown)=>e instanceof Error?e.message:String(e);
 const cap=(s:string)=>s.charAt(0).toUpperCase()+s.slice(1);
@@ -85,6 +87,13 @@ function Icon(p:{name:"menu"|"panel"|"sidebar"|"close"|"refresh"|"plus"|"stop"|"
     folder:"M3 6h5l2 2h7v8H3z",compose:"M11 4H4v12h12V9M8 12l1-3 6-6 2 2-6 6z",chevron:"M8 5l5 5-5 5",pencil:"M4 16l1-4 8-8 3 3-8 8zM12 5l3 3",archive:"M3 5h14v3H3zM4 8v8h12V8M8 11h4",more:"M5 10h.01M10 10h.01M15 10h.01",attach:"M16 9.5l-6 6a3.5 3.5 0 0 1-5-5l7-7a2.5 2.5 0 0 1 3.5 3.5l-7 7a1.2 1.2 0 0 1-1.7-1.7l6-6",image:"M3 4h14v12H3zM3 14l4-4 3 3 3-3 4 4M13.5 7.5h.01",restore:"M4 10a6 6 0 1 0 2-4.5M4 3v4h4",up:"M10 16V4M5 9l5-5 5 5",bot:"M4 7h12v9H4zM10 4v3M8 3.5h4M7.5 10.5v1.5M12.5 10.5v1.5M7.5 14h5M2 10v3M18 10v3",cpu:"M6 6h8v8H6zM8 3v3M12 3v3M8 14v3M12 14v3M3 8h3M3 12h3M14 8h3M14 12h3",
   };
   return <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d={d[p.name]}/></svg>;
+}
+/** Small thumbnails of the images sent with a user message, loaded one by one from the session; the plain "N images" label stays as the fallback. */
+function SentImages(p:{session:string;message:string;count:number}){
+  const [failed,setFailed]=createSignal(false),label=()=>`${p.count} image${p.count===1?"":"s"}`;
+  return <Show when={!failed()} fallback={<div class="msg-images"><Icon name="image"/>{label()}</div>}>
+    <ul class="msg-thumbs" aria-label={label()}><For each={Array.from({length:p.count},(_,i)=>i)}>{i=>{const src=`/api/sessions/${p.session}/messages/${p.message}/images/${i}`;return <li><a href={src} target="_blank" rel="noopener noreferrer" title="Open the full image"><img src={src} alt={`Sent image ${i+1} of ${p.count}`} loading="lazy" onError={()=>setFailed(true)}/></a></li>;}}</For></ul>
+  </Show>;
 }
 function WriteRecovery(p:{sessionId:string;approval:ApprovalView;offline:boolean;onDone:(id:string)=>Promise<void>}){
   const [observed,setObserved]=createSignal<WriteObservation|null>(null),[busy,setBusy]=createSignal(false),[error,setError]=createSignal(""),[done,setDone]=createSignal(false);
@@ -181,9 +190,9 @@ function App(){
   const roleOf=(agentId?:string)=>{const a=agents().find(x=>x.id===agentId);return a?(a.parentId?cap(a.role):"Root"):"Agent";};
   const attention=()=>pending().length+mergePending()+(current()?.recoveryInputs.length||0)+(current()?.recoveryActions.length||0)+childTrouble().filter(a=>a.status==="error").length;
   const listed=()=>sessions().find(s=>s.id===current()?.id);
-  const sessionTitle=(s:Listed)=>s.title?firstLine(s.title,64):"Untitled session";
+  const sessionTitle=(s:Listed)=>s.title?firstLine(plainMentions(s.title),64):"Untitled session";
   const duplicate=(s:Listed)=>sessions().some(o=>o.id!==s.id&&sessionTitle(o)===sessionTitle(s));
-  const currentTitle=()=>{const first=current()?.messages.find(m=>m.role==="user");return first?firstLine(first.text||"Image",90):listed()?.title?firstLine(listed()!.title!,90):"Untitled session";};
+  const currentTitle=()=>{const first=current()?.messages.find(m=>m.role==="user");return first?firstLine(plainMentions(first.text)||"Image",90):listed()?.title?firstLine(plainMentions(listed()!.title!),90):"Untitled session";};
   const running=()=>current()?.status==="running";
   const composing=()=>!showProjects()&&!showRoles()&&!showProviders()&&!current()&&!loadingId()&&!openFailed()&&!focusedTask();
   const activeRepositoryWork=()=>focusedTask()?.coordinatorId===current()?.id&&focusedTask()!.repositories.some(repo=>taskMembers()[repo.id]?.status==="running");
@@ -951,7 +960,7 @@ function App(){
           <For each={graphNode()&&graphNode()!.id!==current()?.id&&!graphHistory()?[]:conversation()!.messages.slice(-shown())}>{m=><Show when={!m.interim}><article class={`msg ${m.role==="user"?"user":"assistant"}`}>
             <div class="msg-author" classList={{"sr-only":m.role==="user"}}>{m.role==="user"?"You":<><Logo class="avatar"/>Sigma<span class="muted">{graphNode()?.role??"root"} agent</span></>}</div>
             <Show when={m.text||!m.images}><div class="msg-body">{m.role==="user"?renderMentions(m.text):m.text}</div></Show>
-            <Show when={m.images}><div class="msg-images"><Icon name="image"/>{m.images} image{m.images===1?"":"s"}</div></Show>
+            <Show when={m.images}><SentImages session={conversation()!.id} message={m.id} count={m.images!}/></Show>
           </article><Show when={m.role==="user"&&(m.work||workLive()&&m.id===lastUserId())}><WorkBlock id={m.id} work={m.work} at={m.at} live={workLive()&&m.id===lastUserId()}/></Show></Show>}</For>
           <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body">{draft()}<span class="caret" aria-hidden="true"/></div></article></Show>
           <Show when={!graphNode()||graphNode()!.id===current()?.id}><Outcome/></Show>

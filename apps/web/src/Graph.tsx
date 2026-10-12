@@ -4,6 +4,7 @@ import { api } from "./api.js";
 
 // Layout: an indented tree (fits the narrow details panel). Down edges run on the left trunk,
 // returns and cross-chat transfers on lanes to the right of the cards.
+// PAD, NODE_W and NODE_H are mirrored in style.css (.graph-user, .graph-node): a constant inline style would be compiled into the HTML template, which the CSP (style-src 'self') blocks.
 const PAD=14,INDENT=34,NODE_W=264,NODE_H=82,GAP=18,TOP=52,LANE=10;
 const labels:Record<GraphFact["kind"],string>={creation:"Created",delegation:"Delegated",result:"Result",prompt:"Prompt",steer:"Steer",followUp:"Follow-up",review_evidence:"Review evidence"};
 const label=(fact:GraphFact)=>fact.kind==="result"&&fact.cause==="user_review_transfer"?"Review handoff":labels[fact.kind];
@@ -163,7 +164,7 @@ export function Graph(p:{id:string;active:boolean;selected:string|null;waiting?:
             </g>}</For>
           </svg>
           <Show when={rootUser().length>0&&!!point(graph()!.rootId)}>
-            <div class="graph-user" style={{left:`${PAD}px`,top:"8px"}}>
+            <div class="graph-user">
               <span class="graph-user-pill">You</span>
               <span class="graph-user-note">{label(fact(rootUser().at(-1)!))}{prompts()>1?` ×${prompts()}`:""} · #{rootUser().at(-1)!.seq} {fact(rootUser().at(-1)!).outcome}</span>
             </div>
@@ -171,7 +172,7 @@ export function Graph(p:{id:string;active:boolean;selected:string|null;waiting?:
           <For each={layout().order.map(item=>item.id)}>{id=>{
             const node=()=>byId().get(id)!,pos=()=>point(id)!,inbound=()=>incoming(id),outbound=()=>returned(id);
             return <Show when={byId().get(id)&&point(id)}><button class={`graph-node gs-${node().status}`} data-node={id} classList={{waiting:!!p.waiting?.[id],selected:selected()===id,root:id===graph()!.rootId,dim:!!hover()&&hover()!==id&&!edges().some(edge=>[edge.fact.source,edge.fact.target].includes(hover()!)&&[edge.fact.source,edge.fact.target].includes(id))}}
-              style={{left:`${pos().x}px`,top:`${pos().y}px`,width:`${NODE_W}px`,height:`${NODE_H}px`}}
+              style={{left:`${pos().x}px`,top:`${pos().y}px`}}
               onClick={()=>p.onNode(node())} onKeyDown={e=>nodeKeys(e,id)} onPointerEnter={()=>setHover(id)} onPointerLeave={()=>setHover(null)} onFocus={()=>setHover(id)} onBlur={()=>setHover(null)} aria-pressed={selected()===id}
               aria-label={`${node().title}. ${roleOf(node())}. ${node().status}${p.waiting?.[id]?`, waiting for your approval of ${p.waiting[id]}`:""}.${p.unsupervised?.[id]!==undefined?" Unsupervised: AGY runs its own tools without Sigma approvals.":""} Model ${node().model}. Reasoning ${reasoning(node())}.${inbound()?` ${label(fact(inbound()!))} by ${name(fact(inbound()!).source)}, ${fact(inbound()!).outcome}.`:""}${outbound()?` ${label(fact(outbound()!))} to ${name(fact(outbound()!).target)}, ${fact(outbound()!).outcome}.`:""} Open chat history.`}>
               <span class="gn-top"><span class={`gn-status st-${node().status}`} aria-hidden="true">{glyph[node().status]??"?"}</span><strong>{node().title}</strong><span class="gn-role">{roleOf(node())}</span></span>

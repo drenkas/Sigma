@@ -230,8 +230,9 @@ function asPixels(value:unknown,_name:string){if(typeof value!=="number"||!Numbe
 function safeUrl(value:unknown){if(typeof value!=="string"||value.length>4096)throw new Error("Use a full HTTP or HTTPS URL");try{const url=new URL(value);if(!["http:","https:"].includes(url.protocol)||!url.hostname||url.username||url.password)throw new Error();return url.toString();}catch{throw new Error("Use a full HTTP or HTTPS URL without embedded credentials");}}
 function normalizedAction(kind:BrowserUseActionKind,input:ActionInput):Record<string,unknown>{
   if(kind==="screenshot")return {};
+  // Navigation does not depend on screenshot coordinates, so it needs no observation: it must still work on a page whose screenshots are blocked (e.g. a sign-in page).
+  if(kind==="navigate")return {url:safeUrl(input.url)};
   if(typeof input.observationId!=="string"||!input.observationId||input.observationId.length>100)throw new Error("Observation is missing or stale; take a fresh browser screenshot first");
-  if(kind==="navigate")return {url:safeUrl(input.url),observationId:input.observationId};
   if(kind==="click")return {x:asPixels(input.x,"x"),y:asPixels(input.y,"y"),observationId:input.observationId};
   if(kind==="scroll"){
     const x=asPixels(input.x,"x"),y=asPixels(input.y,"y"),deltaX=input.deltaX??0,deltaY=input.deltaY??0;
@@ -549,7 +550,7 @@ export class BrowserUse{
       };
       if(kind==="screenshot"){approvalDetail=`Capture visible page at ${selected.origin}`;}
       else if(kind==="navigate"){
-        checkObservation();approvalDetail=`Navigate within ${new URL(String(params.url)).origin}`;
+        approvalDetail=`Navigate within ${new URL(String(params.url)).origin}`;
       }
       else if(kind==="click"||kind==="scroll"){
         checkObservation();approvalDetail=`${kind} at screenshot coordinate ${Math.round(Number(params.x))},${Math.round(Number(params.y))} on ${selected.origin}`;
@@ -560,7 +561,7 @@ export class BrowserUse{
       }
       const prepared=await this.actionRow(sessionId,kind,selected,toolCallId,requestHash,approvalDetail);if("prior" in prepared)return this.receipt(prepared.prior,images);
       row=prepared.row;await this.bump(sessionId);check();
-      const before=kind==="screenshot"?undefined:await this.screenshot(live,selected);if(kind!=="screenshot"){
+      const needsObservation=kind!=="screenshot"&&kind!=="navigate",before=needsObservation?await this.screenshot(live,selected):undefined;if(needsObservation){
         if(!before)throw new Error("A fresh browser observation is required");
         const expected=selected.observation,focusAction=kind==="type"||kind==="key";
         // ponytail: exact PNG equality safely rejects moving pages instead of adding a heuristic image-diff path.
@@ -577,7 +578,7 @@ export class BrowserUse{
       }
       const allowed=await approve(approvalDetail);if(!allowed){await this.storage.call("browserActionTransition",{id:row.id,from:"proposed",to:"denied",patch:{endedAt:Date.now(),detail:"Denied by user"}});return this.receipt({...row,status:"denied",endedAt:Date.now(),detail:"Denied by user"},images);}
       check();await this.assertSelectedPageSafe(live,selected);check();
-      if(kind!=="screenshot"){
+      if(needsObservation){
         const fresh=await this.screenshot(live,selected),focusAction=kind==="type"||kind==="key",observation=selected.observation;
         if(selected.generation!==observation?.generation||fresh.width!==before!.width||fresh.height!==before!.height||fresh.cssWidth!==before!.cssWidth||fresh.cssHeight!==before!.cssHeight||(!focusAction&&fresh.sha256!==before!.sha256))throw new Error("The Chrome page changed while approval was pending; action cancelled");
         checkObservation();
@@ -591,9 +592,9 @@ export class BrowserUse{
       }
       await this.assertSelectedPageSafe(live,selected);check();
       const approved=await this.storage.call<BrowserUseActionView|undefined>("browserActionTransition",{id:row.id,from:"proposed",to:"approved",patch:{}});if(!approved)throw new Error("Browser action approval is no longer current");
-      state="approved";check();await this.assertSelectedPageSafe(live,selected);check();const started=await this.storage.call<BrowserUseActionView|undefined>("browserActionTransition",{id:row.id,from:"approved",to:"dispatched",patch:{detail:"Command sent to the selected Chrome tab"}});if(!started)throw new Error("Browser action could not be dispatched");state="dispatched";await this.bump(sessionId);check();await this.assertSelectedPageSafe(live,selected);check();if(kind!=="screenshot")checkObservation();
+      state="approved";check();await this.assertSelectedPageSafe(live,selected);check();const started=await this.storage.call<BrowserUseActionView|undefined>("browserActionTransition",{id:row.id,from:"approved",to:"dispatched",patch:{detail:"Command sent to the selected Chrome tab"}});if(!started)throw new Error("Browser action could not be dispatched");state="dispatched";await this.bump(sessionId);check();await this.assertSelectedPageSafe(live,selected);check();if(needsObservation)checkObservation();
       if(kind==="navigate"){
-        checkObservation();const loaded=live.cdp.waitForEvent("Page.loadEventFired",selected.sessionId,8_000),within=live.cdp.waitForEvent("Page.navigatedWithinDocument",selected.sessionId,8_000),mainNavigated=live.cdp.waitForEvent("Page.frameNavigated",selected.sessionId,8_000,event=>!event.params.frame?.parentId);void loaded.promise.catch(()=>{});void within.promise.catch(()=>{});void mainNavigated.promise.catch(()=>{});sent=true;
+        const loaded=live.cdp.waitForEvent("Page.loadEventFired",selected.sessionId,8_000),within=live.cdp.waitForEvent("Page.navigatedWithinDocument",selected.sessionId,8_000),mainNavigated=live.cdp.waitForEvent("Page.frameNavigated",selected.sessionId,8_000,event=>!event.params.frame?.parentId);void loaded.promise.catch(()=>{});void within.promise.catch(()=>{});void mainNavigated.promise.catch(()=>{});sent=true;
         try{const result=await live.cdp.command("Page.navigate",{url:params.url},selected.sessionId);if(result.errorText)throw new Error("Chrome navigation did not complete");if(result.loaderId){within.cancel();await mainNavigated.promise;if(selected.blockedControlPage){completed=true;throw new ControlPageBlocked();}await loaded.promise;}else{loaded.cancel();mainNavigated.cancel();await within.promise;}completed=true;}finally{loaded.cancel();within.cancel();mainNavigated.cancel();}
       }else if(kind==="click"||kind==="scroll"){
         const observed=selected.observation!,current=await this.screenshot(live,selected);await this.assertSelectedPageSafe(live,selected);check();const visual=await live.cdp.command("Page.getLayoutMetrics",{},selected.sessionId),viewport=visual.cssVisualViewport;
@@ -679,7 +680,7 @@ export class BrowserUse{
       defineTool({name:"browser_type",label:"Browser type",description:"Type up to 500 non-secret characters into the focused text field in the tab selected in Sigma: current Chrome or explicitly started Internal Chrome. Never enter passwords, one-time codes, payment details, or other secrets; tool arguments may remain in Pi history. Use a fresh observationId. Follows Sigma access mode; an image-capable model is required.",parameters:Type.Object({text:Type.String({minLength:1,maxLength:500}),observationId:Type.String({minLength:1,maxLength:100})}),execute:async(id,p)=>this.act(sessionId,id,"type",p as ActionInput,approve,images())}),
       defineTool({name:"browser_scroll",label:"Browser scroll",description:"Scroll the browser tab currently selected in Sigma: current Chrome or Internal Chrome started by the user's exact /browser internal command. Use screenshot-pixel coordinates and a fresh observationId. Follows Sigma access mode; an image-capable model is required.",parameters:Type.Object({x:Type.Number(),y:Type.Number(),deltaX:Type.Number(),deltaY:Type.Number(),observationId:Type.String({minLength:1,maxLength:100})}),execute:async(id,p)=>this.act(sessionId,id,"scroll",p as ActionInput,approve,images())}),
       defineTool({name:"browser_key",label:"Browser key",description:"Press one supported navigation key in the tab selected in Sigma: current Chrome or explicitly started Internal Chrome. Use a fresh observationId. Enter is blocked when a credential field or frame could receive it. Follows Sigma access mode; an image-capable model is required.",parameters:Type.Object({key:Type.String({minLength:1,maxLength:20}),observationId:Type.String({minLength:1,maxLength:100})}),execute:async(id,p)=>this.act(sessionId,id,"key",p as ActionInput,approve,images())}),
-      defineTool({name:"browser_navigate",label:"Browser navigate",description:"Navigate the currently selected browser tab in Sigma: current Chrome or Internal Chrome started by the user's exact /browser internal command. Only HTTP or HTTPS URLs are allowed. Use the latest observationId; credentials in URLs are rejected. Follows Sigma access mode.",parameters:Type.Object({url:Type.String({minLength:8,maxLength:4096}),observationId:Type.String({minLength:1,maxLength:100})}),execute:async(id,p)=>this.act(sessionId,id,"navigate",p as ActionInput,approve,images())}),
+      defineTool({name:"browser_navigate",label:"Browser navigate",description:"Navigate the currently selected browser tab in Sigma: current Chrome or Internal Chrome started by the user's exact /browser internal command. Only HTTP or HTTPS URLs are allowed. No screenshot or observationId is needed, so it also works on a page where screenshots are blocked (for example a sign-in page); credentials in URLs are rejected. Follows Sigma access mode.",parameters:Type.Object({url:Type.String({minLength:8,maxLength:4096}),observationId:Type.Optional(Type.String({minLength:1,maxLength:100}))}),execute:async(id,p)=>this.act(sessionId,id,"navigate",p as ActionInput,approve,images())}),
     ];
   }
 }

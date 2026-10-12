@@ -34,7 +34,7 @@ export function Qa(p:{id:string;revision:string;askMode?:boolean}){
       <Show when={run.status==="unknown"}><p class="field-help warn">An action or the server stopped with an unknown outcome. This run is blocked and nothing is replayed; start a new run.</p></Show>
       <Show when={live(run)}><button class="btn danger-ghost sm" disabled={busy()} onClick={()=>cancel(run)}>Cancel run</button></Show>
       <Show when={actionsOf(run).length}><ul class="log"><For each={actionsOf(run)}>{a=><li><span class="badge"><span class="glyph" aria-hidden="true"/>{a.status}</span><span class="mono truncate" title={`${a.kind} ${a.target}`}>{a.kind} {a.target}{a.text!==undefined?` ← ${JSON.stringify(a.text.slice(0,60))}`:""}</span><span class="muted small nowrap">{a.outcome??a.detail.slice(0,60)}</span></li>}</For></ul></Show>
-      <Show when={shots(run).length}><div class="field-row"><For each={shots(run)}>{shot=><a href={`/api/sessions/${p.id}/qa/artifacts/${shot.id}`} target="_blank" rel="noopener"><img src={`/api/sessions/${p.id}/qa/artifacts/${shot.id}`} alt={`Screenshot ${shot.width}×${shot.height} at revision ${shot.revision.slice(0,12)}`} width="160" loading="lazy" style="border:1px solid var(--border,#8884);border-radius:4px"/></a>}</For></div></Show>
+      <Show when={shots(run).length}><div class="field-row"><For each={shots(run)}>{shot=><a href={`/api/sessions/${p.id}/qa/artifacts/${shot.id}`} target="_blank" rel="noopener"><img src={`/api/sessions/${p.id}/qa/artifacts/${shot.id}`} alt={`Screenshot ${shot.width}×${shot.height} at revision ${shot.revision.slice(0,12)}`} width="160" loading="lazy" class="browser-thumbnail"/></a>}</For></div></Show>
     </div>}</For>
   </section>;
 }

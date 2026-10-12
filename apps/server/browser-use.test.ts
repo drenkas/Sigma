@@ -283,7 +283,7 @@ test("Pi browser tools use the supervised owner gate and real Chrome target with
     await browser.connect(sessionId);view=await browser.refresh(sessionId);const same=view.targets.find(item=>item.label==="Slow outcome fixture");assert.ok(same,"the uncertain navigation reaches the fixture's final page");await browser.select(sessionId,same!.id);
     const afterReconnect=await latestObservation();
     await assert.rejects(()=>call("unknown-slow-navigation","navigate",slowArgs),/unknown outcome and was not replayed/);
-    await assert.rejects(()=>call("unknown-slow-navigation","navigate",{url:`${fixture.origin}/slow`,observationId:afterReconnect}),/already used for different arguments/);
+    await assert.rejects(()=>call("unknown-slow-navigation","navigate",{url:`${fixture.origin}/slow?again`,observationId:afterReconnect}),/already used for different arguments/);
     assert.equal(fixture.slowHits,1,"the uncertain navigation is never automatically replayed");
 
     phase="pinch-pan coordinate calibration";const panNavigation=await latestObservation();await call("navigate-pan-fixture","navigate",{url:`${fixture.origin}/pan`,observationId:panNavigation});
@@ -299,6 +299,9 @@ test("Pi browser tools use the supervised owner gate and real Chrome target with
     const denyShotId=`credential-screenshot-${crypto.randomUUID()}`,beforeDenied=(await browser.view(sessionId)).artifacts.length;
     await assert.rejects(()=>call(denyShotId,"screenshot",{}),/Screenshots are blocked while a visible credential/);
     assert.equal((await browser.view(sessionId)).artifacts.length,beforeDenied,"a denied screenshot does not create an artifact");
+    await assert.rejects(()=>call(`credential-click-${crypto.randomUUID()}`,"click",{x:1,y:1,observationId:revealObservation}),/Observation is missing or stale/,"coordinate actions still need a real screenshot observation on a credential page");
+    const left=info(await call(`leave-credential-page-${crypto.randomUUID()}`,"navigate",{url:`${fixture.origin}/next`}));assert.equal(left.status,"done","navigation needs no observation, so the agent can leave a page whose screenshots are blocked");
+    await call(`return-after-credential-${crypto.randomUUID()}`,"navigate",{url:`${fixture.origin}/`});
 
     phase="unsupported file target invalidation";const file=join(scratch,"outside-page.html");writeFileSync(file,"<!doctype html><title>Outside browser page</title>");
     assert.equal((await browser.view(sessionId)).status,"selected","the selected original tab remains active through safe HTTP navigation");

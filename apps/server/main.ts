@@ -428,8 +428,17 @@ app.get<{Querystring:{session?:string;cwd?:string;q?:string}}>("/api/mentions",a
       return await searchMentions(q,{...context,skills:await listSkills(context.cwd,[join(dataDir,"agent","skills")])});
     }
     if(typeof cwd!=="string"||!isAbsolute(cwd)||!statSync(cwd).isDirectory())return reply.code(400).send({error:"Session or an existing absolute folder required"});
-    return await searchMentions(q,{cwd,deny:[dataDir],skills:await listSkills(cwd,[join(dataDir,"agent","skills")])});
+    return await searchMentions(q,{cwd,tools:host.newSessionTools(cwd),deny:[dataDir],skills:await listSkills(cwd,[join(dataDir,"agent","skills")])});
   }catch{return reply.code(404).send({error:"Mentions unavailable"});}
+});
+// One sent image of a user message, for the chat thumbnails. Same cookie/host/origin guards as every /api route; only raster types are served.
+app.get<{Params:{id:string;message:string;position:string}}>("/api/sessions/:id/messages/:message/images/:position",async(req,reply)=>{
+  const position=/^\d{1,2}$/.test(req.params.position)?Number(req.params.position):-1;
+  try{
+    const image=position>=0?await host.messageImage(req.params.id,req.params.message,position):undefined;
+    if(!image||!IMAGE_TYPES.has(image.mimeType))return reply.code(404).send({error:"Image unavailable"});
+    return reply.header("Content-Type",image.mimeType).header("Cache-Control","private, max-age=300").send(image.data);
+  }catch{return reply.code(404).send({error:"Image unavailable"});}
 });
 const IMAGE_TYPES=new Set(["image/png","image/jpeg","image/gif","image/webp"]);
 function promptImages(value:unknown):{mimeType:string;data:string}[]|undefined{
