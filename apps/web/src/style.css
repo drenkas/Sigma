@@ -75,12 +75,11 @@ kbd{border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:
 
 /* ---------- shell ---------- */
 .shell{display:grid;grid-template-columns:var(--side-w) minmax(0,1fr) var(--details-w);height:100vh;height:100dvh}
-.shell.projects-view,.shell.composing{grid-template-columns:var(--side-w) minmax(0,1fr)}
+.shell.projects-view{grid-template-columns:var(--side-w) minmax(0,1fr)}
 .role-row{display:grid;grid-template-columns:140px minmax(0,2fr) minmax(0,1fr);gap:12px;align-items:center;padding:10px 0;border-top:1px solid var(--border)}
 .role-row:first-child{border-top:0}
 .role-name{font-weight:600}
 @media (max-width:600px){.role-row{grid-template-columns:minmax(0,2fr) minmax(0,1fr)}.role-name{grid-column:1/-1}}
-.shell.composing .details{display:none}
 .sidebar,.main,.details{min-width:0;min-height:0;display:flex;flex-direction:column}
 .sidebar{background:var(--surface);border-right:1px solid var(--border)}
 .details{background:var(--surface);border-left:1px solid var(--border)}
@@ -457,7 +456,7 @@ select.input option{background:var(--surface-2)}
 @media (min-width:900px){
   .shell.nav-collapsed .sidebar{display:none}
   .shell.nav-collapsed{grid-template-columns:minmax(0,1fr) var(--details-w)}
-  .shell.nav-collapsed.projects-view,.shell.nav-collapsed.composing{grid-template-columns:minmax(0,1fr)}
+  .shell.nav-collapsed.projects-view{grid-template-columns:minmax(0,1fr)}
 }
 @media (min-width:900px) and (max-width:1279px){.shell.nav-collapsed{grid-template-columns:minmax(0,1fr)}}
 @media (min-width:1280px){
@@ -467,7 +466,7 @@ select.input option{background:var(--surface-2)}
 }
 /* ≤899: sessions sidebar becomes a drawer too */
 @media (max-width:899px){
-  .shell,.shell.projects-view,.shell.composing{grid-template-columns:minmax(0,1fr)}
+  .shell,.shell.projects-view{grid-template-columns:minmax(0,1fr)}
   .shell .only-nav{display:inline-grid}
   .shell .btn.only-nav{display:inline-flex}
   .shell .icon-btn.dock-nav{display:none}
