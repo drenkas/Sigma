@@ -8,6 +8,7 @@ import { Qa } from "./Qa.js";
 import { BrowserUsePanel } from "./BrowserUse.js";
 import { WorkerMerges } from "./WorkerMerges.js";
 import { Logo } from "./Logo.js";
+import { Markdown } from "./Markdown.js";
 import { Graph } from "./Graph.js";
 import { Repository } from "./Repository.js";
 import { Roles } from "./Roles.js";
@@ -716,7 +717,7 @@ function App(){
     <Show when={p.child&&selectedChildId()===p.agent.id}><div class="child-detail">
       <Show when={childView()?.id===p.agent.id} fallback={<p class="hint">Loading child history…</p>}>
         <p class="hint">This is {cap(p.agent.role)} {short(p.agent.id)}’s own Pi history. Interrupted output may be partial; settled does not verify the result.</p>
-        <div class="child-messages" aria-label={`${p.agent.role} history`}><For each={childView()!.messages}>{m=><div class="child-message"><strong>{m.role==="user"?"Task / you":"Child reply"}</strong><p>{m.text}</p></div>}</For></div>
+        <div class="child-messages" aria-label={`${p.agent.role} history`}><For each={childView()!.messages}>{m=><div class="child-message"><strong>{m.role==="user"?"Task / you":"Child reply"}</strong>{m.role==="user"?<p>{m.text}</p>:<Markdown class="md child-md" text={m.text}/>}</div>}</For></div>
         <Show when={childView()!.recoveryInputs.length}><div class="callout error-callout"><strong>Uncertain child input.</strong> Inspect history before sending a new command.<For each={childView()!.recoveryInputs}>{input=><pre class="recovery-text">{input.text}</pre>}</For></div></Show>
         <Show when={!p.agent.revisionReviewer&&profile().maxDepth>0&&(p.agent.status==="running"||p.agent.status==="settled")} fallback={<Show when={profile().maxDepth===0}><p class="hint">Use Code changes to stop this revision-bound reviewer.</p></Show>}><form class="child-form" onSubmit={e=>{e.preventDefault();void sendChild(p.agent);}}>
           <label for={`child-text-${p.agent.id}`} class="field-label">Message to this child</label>
@@ -979,10 +980,10 @@ function App(){
           </Show>
           <For each={graphNode()&&graphNode()!.id!==current()?.id&&!graphHistory()?[]:conversation()!.messages.slice(-shown())}>{m=><Show when={!m.interim}><article class={`msg ${m.role==="user"?"user":"assistant"}`}>
             <div class="msg-author" classList={{"sr-only":m.role==="user"}}>{m.role==="user"?"You":<><Logo class="avatar"/>Sigma<span class="muted">{graphNode()?.role??"root"} agent</span></>}</div>
-            <Show when={m.text||!m.images}><div class="msg-body">{m.role==="user"?renderMentions(m.text):m.text}</div></Show>
+            <Show when={m.text||!m.images}>{m.role==="user"?<div class="msg-body">{renderMentions(m.text)}</div>:<Markdown class="msg-body md" text={m.text}/>}</Show>
             <Show when={m.images}><SentImages session={conversation()!.id} message={m.id} count={m.images!}/></Show>
           </article><Show when={m.role==="user"&&(m.work||workLive()&&m.id===lastUserId())}><WorkBlock id={m.id} work={m.work} at={m.at} live={workLive()&&m.id===lastUserId()}/></Show></Show>}</For>
-          <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body">{draft()}<span class="caret" aria-hidden="true"/></div></article></Show>
+          <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body md"><Markdown text={draft()}/><span class="caret" aria-hidden="true"/></div></article></Show>
           <Show when={!graphNode()||graphNode()!.id===current()?.id}><Outcome/></Show>
         </div>
       </div>
