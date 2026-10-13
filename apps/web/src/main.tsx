@@ -20,7 +20,7 @@ import { createMention, renderMentions } from "./MentionPicker.js";
 import "./style.css";
 
 type Model = { provider:string; id:string; name:string; images:boolean; reasoningLevels?:string[]; legacy?:boolean };
-type Listed = { id:string; cwd:string; sourceCwd?:string; model:string; status:string; created_at?:number; title?:string|null; archived_at?:number|null };
+type Listed = { id:string; cwd:string; sourceCwd?:string; model:string; status:string; created_at?:number; title?:string|null; archived_at?:number|null; waiting?:boolean };
 type Notice = { kind:"error"|"warning"|"info"; text:string };
 type Conn = "connecting"|"ready"|"live"|"reconnecting"|"unreachable";
 type Tool = { agentId?:string; tool:string; status:string; detail?:string };
@@ -35,6 +35,7 @@ type WriteObservation = {id:string;sessionId:string;path:string;beforeHash:strin
 const RUN:Record<string,{label:string;hint:string}>={
   idle:{label:"Idle",hint:"No Pi run in progress."},
   running:{label:"Running",hint:"A Pi run is in progress."},
+  waiting:{label:"Waiting",hint:"The agent is waiting for you to answer an approval request."},
   settled:{label:"Settled",hint:"The Pi run ended. This is not proof that the engineering task succeeded."},
   interrupted:{label:"Interrupted",hint:"Stopped by you or by a service restart."},
   error:{label:"Error",hint:"The Pi run ended with an error."},
@@ -661,10 +662,11 @@ function App(){
     <span class="session-title">{p.task.projectName} · multi-repo</span><span class="tag session-demo">{taskState(p.task.status)}</span>
     <span class="session-meta"><span>{p.task.repositories.length} repositories</span><span class="dot-sep" aria-hidden="true">·</span><span class="nowrap">{ago(p.task.createdAt)}</span></span>
   </button>;
+  const rowStatus=(s:Listed)=>{const open=current()?.id===s.id,status=open?current()!.status:s.status;return status==="running"&&(open?pending().length>0:!!s.waiting)?"waiting":status;};
   const SessionRow=(p:{s:Listed;archived?:boolean})=><div class="session-row">
     <button class="session" classList={{active:!showProjects()&&current()?.id===p.s.id,loading:loadingId()===p.s.id}} aria-current={!showProjects()&&current()?.id===p.s.id?"page":undefined} onClick={()=>select(p.s.id)}>
       <span class="session-title">{sessionTitle(p.s)}</span>
-      <span class="session-meta"><RunBadge status={p.s.status} quiet/><span class="dot-sep" aria-hidden="true">·</span><span class="truncate">{base(p.s.sourceCwd??p.s.cwd)}{p.s.sourceCwd&&p.s.sourceCwd!==p.s.cwd?" · code":""}</span><Show when={p.s.created_at}><span class="dot-sep" aria-hidden="true">·</span><span class="nowrap">{ago(p.s.created_at)}</span></Show><Show when={duplicate(p.s)}><span class="dot-sep" aria-hidden="true">·</span><span class="mono nowrap" title={p.s.id}>#{p.s.id.slice(0,4)}</span></Show></span>
+      <span class="session-meta"><RunBadge status={rowStatus(p.s)} quiet/><span class="dot-sep" aria-hidden="true">·</span><span class="truncate">{base(p.s.sourceCwd??p.s.cwd)}{p.s.sourceCwd&&p.s.sourceCwd!==p.s.cwd?" · code":""}</span><Show when={p.s.created_at}><span class="dot-sep" aria-hidden="true">·</span><span class="nowrap">{ago(p.s.created_at)}</span></Show><Show when={duplicate(p.s)}><span class="dot-sep" aria-hidden="true">·</span><span class="mono nowrap" title={p.s.id}>#{p.s.id.slice(0,4)}</span></Show></span>
       <Show when={isDemo(p.s.model)}><span class="session-demo">demo</span></Show>
     </button>
     <button class="icon-btn xs row-action session-action" disabled={!p.archived&&p.s.status==="running"} onClick={()=>void archive(p.s,!p.archived)} aria-label={`${p.archived?"Restore":"Archive"} session ${sessionTitle(p.s)}`} title={p.archived?"Restore":p.s.status==="running"?"Stop the session to archive it":"Archive"}><Icon name={p.archived?"restore":"archive"}/></button>

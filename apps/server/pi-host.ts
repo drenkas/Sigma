@@ -882,7 +882,7 @@ export class PiHost {
     if(result.status==="empty")return "; it made no file changes (nothing to integrate)";
     return pending(result.reason??"the merge did not complete");
   }
-  async list(){return this.storage.call<RecordRow[]>("sessions");}
+  async list(){const rows=await this.storage.call<RecordRow[]>("sessions"),waiting=new Set([...this.pending.values()].filter(p=>!p.finalizing).map(p=>p.sessionId));return rows.map(r=>waiting.has(r.id)?{...r,waiting:true}:r);}
   private async assertRegisteredSetup(row:RecordRow,setup:WorkspaceSetup){
     const immutable=(value:WorkspaceSetup|undefined)=>{if(!value)return null;const {phase,observedRevision,...identity}=value;return identity;};
     if(row.id!==setup.sessionId||row.cwd!==setup.cwd||row.managerId!==setup.managerId||row.parentId!==(setup.parentId??null)||row.model!==setup.model||row.role!==(setup.agentRole??"root")||row.policy?.version!==setup.policyVersion||JSON.stringify(row.policy?.requested)!==JSON.stringify(setup.requested)||row.policy?.effective.cwd!==setup.cwd||row.policy?.effective.model!==setup.model||JSON.stringify(row.policy?.effective.profile)!==JSON.stringify(setup.profile)||JSON.stringify(row.policy?.role??null)!==JSON.stringify(setup.role??null)||JSON.stringify(immutable(row.policy?.setup))!==JSON.stringify(immutable(setup)))throw new Error("Registered session differs from the exact saved setup owner and policy");

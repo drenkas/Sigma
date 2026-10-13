@@ -34,10 +34,11 @@ test("ask mode keeps approvals pending until decide, and switching to full relea
     const ids=async()=>(await f.host.snapshot(f.sid)).approvals.filter(a=>a.status==="pending");
     for(let i=0;i<100&&(await ids()).length<2;i++)await new Promise(r=>setTimeout(r,50));
     const pending=await ids();assert.equal(pending.length,2);
+    const waiting=async()=>(await f.host.list() as any[]).find(r=>r.id===f.sid)?.waiting;assert.equal(await waiting(),true);
     await f.host.decide(f.sid,pending.find(a=>a.preview==="read one")!.id,true);assert.ok(await first);
     await f.host.setApprovalMode("full");
     const id=await second;assert.ok(id);assert.equal(await status(f,id!),"approved");
-    assert.equal((await ids()).length,0);
+    assert.equal((await ids()).length,0);assert.equal(await waiting(),undefined);
   }finally{await f.close();}
 });
 

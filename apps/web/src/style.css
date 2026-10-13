@@ -7,7 +7,7 @@
   --accent:#e38a62;--accent-strong:#eda07e;--accent-ink:#2a1810;--accent-soft:#e38a6226;
   --invert:#ecebe6;--invert-ink:#1f1e1c;--invert-hover:#ffffff;
   --logo-bg:var(--accent);--logo-ink:var(--accent-ink);
-  --run:#7fb2f0;--settled:#a8a49b;--interrupted:#e0b469;--error:#ef8a7f;--unknown:#bba3ef;--ok:#86c99a;
+  --run:#7fb2f0;--settled:#a8a49b;--interrupted:#f0975a;--waiting:#e8cf52;--error:#ef8a7f;--unknown:#bba3ef;--ok:#86c99a;
   --warn-bg:#2c2518;--warn-border:#5a4828;--warn-text:#f0cd8e;
   --err-bg:#2e1c1a;--err-border:#653633;--err-text:#ffc0b8;
   --info-bg:#1a2330;--info-border:#2e4560;--info-text:#bed6f3;
@@ -32,7 +32,7 @@
     --text:#22201d;--text-2:#55514a;--text-3:#7f7a72;
     --accent:#c9643c;--accent-strong:#b5552f;--accent-ink:#ffffff;--accent-soft:#c9643c22;
     --invert:#22201d;--invert-ink:#faf9f6;--invert-hover:#000000;
-    --run:#2f6fbf;--settled:#76716a;--interrupted:#a56a10;--error:#c2412f;--unknown:#7350c2;--ok:#2f8a4f;
+    --run:#2f6fbf;--settled:#76716a;--interrupted:#b4530f;--waiting:#8a7300;--error:#c2412f;--unknown:#7350c2;--ok:#2f8a4f;
     --warn-bg:#fdf4e2;--warn-border:#ecd3a1;--warn-text:#7b5410;
     --err-bg:#fdecea;--err-border:#f1c2bb;--err-text:#9a2c1d;
     --info-bg:#eaf2fc;--info-border:#bfd5ef;--info-text:#24538d;
@@ -149,11 +149,12 @@ kbd{border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:
 /* shape carries meaning too, not only colour */
 .st-idle{--c:var(--text-3)} .st-idle .glyph{background:transparent;border:1.5px solid currentColor}
 .st-running{--c:var(--run)} .st-running .glyph{background:transparent;border:1.5px solid currentColor;border-right-color:transparent;animation:spin .9s linear infinite}
-.st-settled{--c:var(--settled)}
+.st-waiting{--c:var(--waiting)} .st-waiting .glyph{animation:pulse 1.6s ease-in-out infinite}
+.st-settled{--c:var(--ok)}
 .st-interrupted{--c:var(--interrupted)} .st-interrupted .glyph{border-radius:1px}
 .st-error{--c:var(--error)} .st-error .glyph{border-radius:1px;transform:rotate(45deg) scale(.9)}
 .st-unknown{--c:var(--unknown)} .st-unknown .glyph{background:transparent;border:1.5px dashed currentColor}
-.ap-pending{--c:var(--interrupted)} .ap-pending .glyph{animation:pulse 1.6s ease-in-out infinite}
+.ap-pending{--c:var(--waiting)} .ap-pending .glyph{animation:pulse 1.6s ease-in-out infinite}
 .ap-approved{--c:var(--ok)}
 .ap-denied{--c:var(--error)} .ap-denied .glyph{border-radius:1px;transform:rotate(45deg) scale(.9)}
 .ap-expired{--c:var(--text-3)} .ap-expired .glyph{background:transparent;border:1.5px solid currentColor}
