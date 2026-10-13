@@ -12,6 +12,10 @@ const API='sigma-antigravity-unsupervised',MODEL='antigravity-default',MAX_ACTIV
 // `-p=` (empty, attached): a bare `-p` would swallow the next flag as its prompt; the prompt itself arrives on stdin.
 // No `--agent`: custom agent definitions restrict AGY's tool set (only read tools, cannot create files); the default main agent keeps write_to_file etc. Verified live against agy 1.2.17 on 2026-10-05.
 export const AGY_ARGV=['-p=','--input-format','stream-json','--output-format','stream-json','--sandbox','--dangerously-skip-permissions'];
+// Pi's options.timeoutMs is an HTTP idle timeout (5 min by default) and must not cut a whole AGY agent turn; it can only raise the 30 min deadline, up to 60 min.
+const AGY_TURN_TIMEOUT_MS=1_800_000,AGY_MAX_TIMEOUT_MS=3_600_000;
+export const agyTurnTimeout=(requested?:number)=>Math.min(Math.max(requested??0,AGY_TURN_TIMEOUT_MS),AGY_MAX_TIMEOUT_MS);
+export function agyTimeoutMessage(timeoutMs:number){const minutes=Math.max(1,Math.round(timeoutMs/60000));return `Antigravity did not finish this turn within ${minutes} minute${minutes===1?'':'s'}. Try again, or split the task into smaller steps.`;}
 const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
 const object=(value:any)=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const count=(value:any)=>Number.isSafeInteger(value)&&value>=0?value as number:0;
@@ -41,7 +45,7 @@ export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:Nativ
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
     const operation=new AbortController(),abort=()=>operation.abort();options?.signal?.addEventListener('abort',abort,{once:true});if(options?.signal?.aborted)operation.abort();
     void (async()=>{
-      let failure='provider_configuration',full='',emitted='',terminal:any,agyError='',imageDir:string|undefined,finishTimer:ReturnType<typeof setTimeout>|undefined,steps=0;const records=new Map<string,Omit<AgyActivity,'agentId'>>(),local=new AbortController();
+      let failure='provider_configuration',full='',emitted='',terminal:any,agyError='',imageDir:string|undefined,finishTimer:ReturnType<typeof setTimeout>|undefined,steps=0,startedAt=0,deadlineMs=0;const records=new Map<string,Omit<AgyActivity,'agentId'>>(),local=new AbortController();
       const emit=(final:boolean)=>{let stable=full;if(!final&&/[\uD800-\uDBFF]$/.test(stable))stable=stable.slice(0,-1);if(!stable.startsWith(emitted)||stable.length===emitted.length)return;const delta=stable.slice(emitted.length);if(!output.content.length){output.content.push({type:'text',text:''});events.push({type:'text_start',contentIndex:0,partial:output});}emitted=stable;(output.content[0] as {text:string}).text=emitted;events.push({type:'text_delta',contentIndex:0,delta,partial:output});};
       try{
         const session=options?.sessionId?sessions.get(options.sessionId):undefined;
@@ -60,7 +64,8 @@ export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:Nativ
           if(before&&before.tool===next.tool&&before.params===next.params&&before.status===next.status&&before.output===next.output)return;
           records.set(key,next);session.activity(next);
         };
-        const result=await owner.run({agy:{cwd:session.cwd},signal:AbortSignal.any([operation.signal,local.signal]),timeoutMs:Math.min(options?.timeoutMs??1_800_000,3_600_000),prepare:async()=>imageDir?[...AGY_ARGV,'--add-dir',imageDir]:AGY_ARGV,onStart:send=>send(agyInputLine(prompt)),onLine:(line,send)=>{
+        deadlineMs=agyTurnTimeout(options?.timeoutMs);startedAt=Date.now();
+        const result=await owner.run({agy:{cwd:session.cwd},signal:AbortSignal.any([operation.signal,local.signal]),timeoutMs:deadlineMs,prepare:async()=>imageDir?[...AGY_ARGV,'--add-dir',imageDir]:AGY_ARGV,onStart:send=>send(agyInputLine(prompt)),onLine:(line,send)=>{
           if(!line.trim())return;failure='native_protocol';const event=JSON.parse(line);if(!object(event)||terminal)throw new Error('Unexpected AGY event');
           if(event.event==='init')return;
           if(event.event==='step_update'){
@@ -81,7 +86,7 @@ export function registerAgyUnsupervisedProvider(runtime:ModelRuntime,owner:Nativ
         operation.signal.throwIfAborted();failure='terminal';if(!terminal||result&&result.exitCode!==0&&result.exitCode!==null)throw new Error('AGY turn did not finish cleanly');
         emit(true);if(output.content[0]?.type==='text')events.push({type:'text_end',contentIndex:0,content:full,partial:output});
         output.stopReason='stop';events.push({type:'done',reason:'stop',message:output});
-      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Antigravity request cancelled':`Antigravity unsupervised request failed (${failure})${agyError?`: ${agyError}`:''}`;events.push({type:'error',reason:output.stopReason,error:output});}
+      }catch{output.stopReason=operation.signal.aborted?'aborted':'error';output.errorMessage=operation.signal.aborted?'Antigravity request cancelled':startedAt&&Date.now()-startedAt>=deadlineMs?agyTimeoutMessage(deadlineMs):`Antigravity unsupervised request failed (${failure})${agyError?`: ${agyError}`:''}`;events.push({type:'error',reason:output.stopReason,error:output});}
       finally{if(finishTimer)clearTimeout(finishTimer);if(imageDir)await rm(imageDir,{recursive:true,force:true}).catch(()=>{});options?.signal?.removeEventListener('abort',abort);events.end();}
     })();return events;
   }

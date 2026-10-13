@@ -11,7 +11,7 @@ const scratch=resolve(import.meta.dirname,'../../.scratch',`agy-unsupervised-${D
 for(const key of Object.keys(process.env))if(!['PATH','TMPDIR','USER'].includes(key))delete process.env[key];
 process.env.HOME=scratch;process.env.PI_CODING_AGENT_DIR=join(scratch,'agent');
 const {AGY_UNSUPERVISED_PROVIDER_ID,NativeCli}=await import('./native-cli.js');
-const {AGY_ARGV,agyInputLine}=await import('./agy-provider.js');
+const {AGY_ARGV,agyInputLine,agyTurnTimeout,agyTimeoutMessage}=await import('./agy-provider.js');
 const {PiHost}=await import('./pi-host.js');
 const {Storage}=await import('./storage.js');
 const {agyProfileIsReady}=await import('./agy-profile.js');
@@ -208,4 +208,9 @@ test('enabling rewrites the profile settings to the unsupervised variant, disabl
     }finally{await chmod(auth,0o600);}
     assert.equal(createHash('sha256').update(await readFile(auth)).digest('hex'),hash,'Auth file untouched');
   }finally{await f.close();}
+});
+
+test('Pi HTTP idle timeout cannot cut an AGY turn; it can only raise the 30 minute deadline up to 60',()=>{
+  assert.equal(agyTurnTimeout(undefined),1_800_000);assert.equal(agyTurnTimeout(300_000),1_800_000);assert.equal(agyTurnTimeout(2_400_000),2_400_000);assert.equal(agyTurnTimeout(7_200_000),3_600_000);
+  assert.match(agyTimeoutMessage(1_800_000),/30 minutes/);
 });
