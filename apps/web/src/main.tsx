@@ -173,7 +173,7 @@ function App(){
   const sessionArchived=()=>!!current()?.archivedAt;
   const taskUnresolved=()=>sessionArchived()||!!focusedTask()&&(focusedTask()!.status!=="running"||!!focusedTask()!.archivedAt);
   const prompts=new Map<string,string>(),attachmentDrafts=new Map<string,Attachment[]>();
-  let stream:EventSource|undefined;let cursor=0;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;let historyTimer:ReturnType<typeof setTimeout>|undefined;let recovering=false;let openGeneration=0;
+  let stream:EventSource|undefined;let cursor=0;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;let historyTimer:ReturnType<typeof setTimeout>|undefined;let recovering=false;let openGeneration=0;let openAbort:AbortController|undefined;const OPEN_TIMEOUT_MS=15_000;
   let scroller:HTMLDivElement|undefined,composer:HTMLTextAreaElement|undefined,detailsPanel:HTMLElement|undefined,detailsTitle:HTMLHeadingElement|undefined,recoverySection:HTMLElement|undefined,treeSection:HTMLElement|undefined,navPanel:HTMLElement|undefined,navTitle:HTMLHeadingElement|undefined,stick=true;
 
   const fail=(e:unknown)=>setNotice({kind:"error",text:humanError(message(e),workspace())});
@@ -306,11 +306,15 @@ function App(){
     setNotice({kind:"warning",text:snapshot.recoveryInputs.some(input=>input.id===saved.id)?"Previous prompt outcome is unknown. Inspect Pi history before sending it again.":"Previous request result was not confirmed. Inspect Pi history before retrying."});
   }
   async function open(id:string){
-    const generation=++openGeneration;
+    const generation=++openGeneration;openAbort?.abort();const ctl=openAbort=new AbortController();let timedOut=false;
     if(current()?.id!==id){++graphReadGeneration;setGraphNode(null);setGraphHistory(null);setGraphHistoryError("");setSelectedChildId(null);setChildView(null);setChildText("");setMergePending(0);}
-    stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(200);setLoadingId(id);setOpenFailed(null);
+    stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(200);if(current()?.id!==id&&conn()!=="reconnecting")setConn("connecting");setLoadingId(id);setOpenFailed(null);
     if(queued()?.id!==id)setQueued(null);
-    const snapshot=await api<SessionView>(`/sessions/${id}`);if(generation!==openGeneration)return;
+    const timer=setTimeout(()=>{timedOut=true;ctl.abort();},OPEN_TIMEOUT_MS);let snapshot:SessionView;
+    try{snapshot=await api<SessionView>(`/sessions/${id}`,"GET",undefined,undefined,ctl.signal);}
+    catch(e){if(generation!==openGeneration)return;if(timedOut)throw new Error("The session did not load within 15 seconds. The local service may be busy; try again.");throw e;}
+    finally{clearTimeout(timer);if(openAbort===ctl)openAbort=undefined;}
+    if(generation!==openGeneration)return;setOpenFailed(null);
     if(current()?.id!==id){if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}setPrompt(prompts.get(id)||"");setAttachments(attachmentDrafts.get(id)||[]);}
     cursor=snapshot.cursor;stick=true;setCurrent(snapshot);setLoadingId(null);setSessions(x=>x.map(s=>s.id===id?{...s,status:snapshot.status}:s));setNotice(null);reconcilePrompt(snapshot);
     if(selectedChildId())void refreshChild(id,selectedChildId()!);
@@ -354,9 +358,9 @@ function App(){
       setConn("reconnecting");
       if(recovering||reconnectTimer)return;
       const recover=async()=>{
-        reconnectTimer=undefined;if(current()?.id!==id)return;recovering=true;setAttempt(x=>x+1);
-        try{await api("/bootstrap","POST",{});if(current()?.id===id)await open(id);}
-        catch{if(current()?.id===id)reconnectTimer=setTimeout(()=>{void recover();},1000);}
+        reconnectTimer=undefined;if(generation!==openGeneration||current()?.id!==id)return;recovering=true;setAttempt(x=>x+1);let expected=generation;
+        try{await api("/bootstrap","POST",{});if(generation===openGeneration&&current()?.id===id){expected=openGeneration+1;await open(id);}}
+        catch{if(openGeneration===expected&&current()?.id===id)reconnectTimer=setTimeout(()=>{void recover();},1000);}
         finally{recovering=false;}
       };
       reconnectTimer=setTimeout(()=>{void recover();},1000);
@@ -379,8 +383,9 @@ function App(){
     setShowProjects(false);
     if(overlayNav())setNavOpen(false);
     const task=taskForSession(id);setTaskFocusId(task?.id??null);if(task)void refreshTask(task.id);
-    try{await open(id);}catch(e){if(loadingId()===id){setLoadingId(null);setOpenFailed({id,text:message(e)});}}
+    await openOrFail(id);
   }
+  async function openOrFail(id:string){try{await open(id);return true;}catch(e){if(loadingId()===id){setLoadingId(null);setOpenFailed({id,text:message(e)});}return false;}}
   async function selectTask(task:ProjectTaskView){
     setShowRoles(false);setShowProviders(false);
     setShowProjects(false);if(overlayNav())setNavOpen(false);
@@ -389,7 +394,7 @@ function App(){
     await select(task.coordinatorId);
   }
   const reasoningLevels=()=>models().find(model=>`${model.provider}/${model.id}`===selectedModel())?.reasoningLevels??[],canReason=()=>reasoningLevels().some(level=>level!=="off"),chosenReasoning=()=>canReason()&&reasoningLevels().includes(reasoning())?reasoning():"";
-  async function create(){const goal=prompt().trim(),images=attachments();if(!selectedModel()||!goal&&!images.length||images.length&&!imagesAllowed())return;const selected=projectId();setBusy(true);setNotice(null);const key="pi-create",fingerprint=`${workspace()||"scratch"}|${selectedModel()}|parallel${workspaceMode()==="worktree"?"|worktree":""}${chosenReasoning()?`|reasoning:${chosenReasoning()}`:""}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),id=saved?.fingerprint===fingerprint?saved.id:crypto.randomUUID();sessionStorage.setItem(key,JSON.stringify({id,fingerprint}));try{const result=await api<{id:string;status:string}>("/sessions","POST",{...(workspace()?{cwd:workspace()}:{scratch:true}),model:selectedModel(),mode:"parallel",workspaceMode:workspaceMode(),...(chosenReasoning()?{reasoning:chosenReasoning()}:{})},id);if(result.status==="unknown")throw new Error("Previous create outcome is unknown. Inspect sessions before starting a new one.");sessionStorage.removeItem(key);setWorkspaceMode("direct");await refresh();if(projectId()!==selected)return;setTaskFocusId(null);setShowProjects(false);if(overlayNav())setNavOpen(false);await open(result.id);setPrompt(goal);setAttachments(images);queueMicrotask(resize);composer?.focus();await send();}catch(e){fail(e);void refreshWorkspaceRecovery().catch(()=>{});}finally{setBusy(false);}}
+  async function create(){const goal=prompt().trim(),images=attachments();if(!selectedModel()||!goal&&!images.length||images.length&&!imagesAllowed())return;const selected=projectId();setBusy(true);setNotice(null);const key="pi-create",fingerprint=`${workspace()||"scratch"}|${selectedModel()}|parallel${workspaceMode()==="worktree"?"|worktree":""}${chosenReasoning()?`|reasoning:${chosenReasoning()}`:""}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),id=saved?.fingerprint===fingerprint?saved.id:crypto.randomUUID();sessionStorage.setItem(key,JSON.stringify({id,fingerprint}));try{const result=await api<{id:string;status:string}>("/sessions","POST",{...(workspace()?{cwd:workspace()}:{scratch:true}),model:selectedModel(),mode:"parallel",workspaceMode:workspaceMode(),...(chosenReasoning()?{reasoning:chosenReasoning()}:{})},id);if(result.status==="unknown")throw new Error("Previous create outcome is unknown. Inspect sessions before starting a new one.");sessionStorage.removeItem(key);setWorkspaceMode("direct");await refresh();if(projectId()!==selected)return;setTaskFocusId(null);setShowProjects(false);if(overlayNav())setNavOpen(false);if(!await openOrFail(result.id))return;setPrompt(goal);setAttachments(images);queueMicrotask(resize);composer?.focus();await send();}catch(e){fail(e);void refreshWorkspaceRecovery().catch(()=>{});}finally{setBusy(false);}}
   async function switchModel(model:string,level:string){const s=current();if(!s||switching())return;setSwitching(true);setNotice(null);try{await api(`/sessions/${s.id}/model`,"POST",{model,reasoning:level||null},crypto.randomUUID());const latest=await api<SessionView>(`/sessions/${s.id}`);setCurrent(x=>x?.id===s.id?{...x,model:latest.model,policy:latest.policy}:x);void refresh().catch(()=>{});}catch(e){fail(e);}finally{setSwitching(false);}}
   function ModelPicker(p:{welcome?:boolean}){
     const s=()=>p.welcome?null:current(),value=()=>s()?.model??selectedModel(),levels=()=>models().find(model=>`${model.provider}/${model.id}`===value())?.reasoningLevels??[],can=()=>levels().some(level=>level!=="off");
@@ -468,7 +473,7 @@ function App(){
   const welcomeMention=createMention({id:"mention-welcome",scope:()=>workspace()?{cwd:workspace()}:null,el:()=>composer,set:setPrompt,resize}),sessionMention=createMention({id:"mention-session",scope:()=>current()?{session:current()!.id}:null,el:()=>composer,set:setPrompt,resize});
   function clearCurrent(){
     if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}
-    ++openGeneration;stream?.close();stream=undefined;
+    ++openGeneration;openAbort?.abort();openAbort=undefined;stream?.close();stream=undefined;
     if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;
     returnGraphRoot();setCurrent(null);setLoadingId(null);setOpenFailed(null);setPrompt("");setAttachments([]);setDraft("");setTools([]);setQueued(null);setNotice(null);setConn("ready");
     setSelectedChildId(null);setChildView(null);setChildText("");setMergePending(0);
