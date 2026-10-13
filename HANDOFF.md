@@ -41,7 +41,7 @@ Git, гілка `main`. `.scratch/`, `.data/`, credentials і build artifacts н
 
 Власники стану: Pi SDK — model context/history (JSONL) і credentials (штатний store); SQLite — lifecycle, commands, approvals, policy snapshots, events. GUI лише відображає; виконанням володіють server managers; orchestration не переносити в Tauri shell.
 
-Версії залежностей не оновлювати попутно: pin — `package.json`/`package-lock.json`, `apps/desktop/src-tauri/Cargo.lock`; Node 24; Vite 7 (Vite 8 мав peer conflict із vite-plugin-solid). Версія продукту — SemVer, bump лише через `npm run version:bump` (див. CLAUDE.md).
+Версії залежностей не оновлювати попутно: pin — `package.json`/`package-lock.json`, `apps/desktop/src-tauri/Cargo.lock`; Node 24; Vite 7 (Vite 8 мав peer conflict із vite-plugin-solid). Версія продукту — SemVer, bump лише через `npm run version:bump` (див. AGENTS.md).
 
 ## Як запускати й перевіряти
 
