@@ -174,6 +174,9 @@ function App(){
   const sessionArchived=()=>!!current()?.archivedAt;
   const taskUnresolved=()=>sessionArchived()||!!focusedTask()&&(focusedTask()!.status!=="running"||!!focusedTask()!.archivedAt);
   const prompts=new Map<string,string>(),attachmentDrafts=new Map<string,Attachment[]>();
+  // Recently viewed chats, shown instantly while the fresh snapshot loads; the stream still opens only after the fresh fetch.
+  const snapshots=new Map<string,SessionView>(),SNAPSHOT_LIMIT=12;
+  const remember=(view:SessionView|null)=>{if(!view)return;snapshots.delete(view.id);snapshots.set(view.id,view);while(snapshots.size>SNAPSHOT_LIMIT)snapshots.delete(snapshots.keys().next().value!);};
   let stream:EventSource|undefined;let cursor=0;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;let historyTimer:ReturnType<typeof setTimeout>|undefined;let recovering=false;let openGeneration=0;let openAbort:AbortController|undefined;const OPEN_TIMEOUT_MS=15_000;
   let scroller:HTMLDivElement|undefined,composer:HTMLTextAreaElement|undefined,detailsPanel:HTMLElement|undefined,detailsTitle:HTMLHeadingElement|undefined,recoverySection:HTMLElement|undefined,treeSection:HTMLElement|undefined,navPanel:HTMLElement|undefined,navTitle:HTMLHeadingElement|undefined,stick=true;
 
@@ -235,6 +238,8 @@ function App(){
   const opening=()=>{const id=loadingId();return !!id&&current()?.id!==id;};
   const detailsBreakpoint=matchMedia("(max-width: 1279px)"),navBreakpoint=matchMedia("(max-width: 899px)");
   const overlayDetails=()=>detailsBreakpoint.matches,overlayNav=()=>navBreakpoint.matches;
+  // Detail panels fetch only while their tab is on screen (overlay: drawer open; docked: not collapsed).
+  const [overlayNow,setOverlayNow]=createSignal(detailsBreakpoint.matches),panelShown=()=>overlayNow()?detailsOpen():!detailsCollapsed();
   // Resizable details panel: user width wins over defaults, persisted per viewer, clamped on every render.
   const DETAILS_MIN=300,SIDE_W=268,CHAT_RESERVE=420;
   const readDetailsW=()=>{try{const n=Number(localStorage.getItem("sigma-details-w"));return Number.isFinite(n)&&n>=DETAILS_MIN?n:null;}catch{return null;}};
@@ -308,14 +313,20 @@ function App(){
   }
   async function open(id:string){
     const generation=++openGeneration;openAbort?.abort();const ctl=openAbort=new AbortController();let timedOut=false;
+    if(current()?.id!==id&&openFailed()?.id!==current()?.id)remember(current());
     if(current()?.id!==id){++graphReadGeneration;setGraphNode(null);setGraphHistory(null);setGraphHistoryError("");setSelectedChildId(null);setChildView(null);setChildText("");setMergePending(0);}
     stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(200);if(current()?.id!==id&&conn()!=="reconnecting")setConn("connecting");setLoadingId(id);setOpenFailed(null);
     if(queued()?.id!==id)setQueued(null);
+    const cached=snapshots.get(id);
+    if(cached&&current()?.id!==id){
+      if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}setPrompt(prompts.get(id)||"");setAttachments(attachmentDrafts.get(id)||[]);
+      stick=true;setCurrent(cached);
+    }
     const timer=setTimeout(()=>{timedOut=true;ctl.abort();},OPEN_TIMEOUT_MS);let snapshot:SessionView;
     try{snapshot=await api<SessionView>(`/sessions/${id}`,"GET",undefined,undefined,ctl.signal);}
-    catch(e){if(generation!==openGeneration)return;if(timedOut)throw new Error("The session did not load within 15 seconds. The local service may be busy; try again.");throw e;}
+    catch(e){if(generation!==openGeneration)return;if((e as {status?:number}).status===404){snapshots.delete(id);if(current()?.id===id)setCurrent(null);}if(timedOut)throw new Error("The session did not load within 15 seconds. The local service may be busy; try again.");throw e;}
     finally{clearTimeout(timer);if(openAbort===ctl)openAbort=undefined;}
-    if(generation!==openGeneration)return;setOpenFailed(null);
+    if(generation!==openGeneration)return;setOpenFailed(null);remember(snapshot);
     if(current()?.id!==id){if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}setPrompt(prompts.get(id)||"");setAttachments(attachmentDrafts.get(id)||[]);}
     cursor=snapshot.cursor;stick=true;setCurrent(snapshot);setLoadingId(null);setSessions(x=>x.map(s=>s.id===id?{...s,status:snapshot.status}:s));setNotice(null);reconcilePrompt(snapshot);
     if(selectedChildId())void refreshChild(id,selectedChildId()!);
@@ -473,6 +484,7 @@ function App(){
   function resize(){if(!composer)return;composer.style.height="auto";composer.style.height=`${Math.min(composer.scrollHeight,window.innerHeight*0.4)}px`;}
   const welcomeMention=createMention({id:"mention-welcome",scope:()=>workspace()?{cwd:workspace()}:null,el:()=>composer,set:setPrompt,resize}),sessionMention=createMention({id:"mention-session",scope:()=>current()?{session:current()!.id}:null,el:()=>composer,set:setPrompt,resize});
   function clearCurrent(){
+    if(openFailed()?.id!==current()?.id)remember(current());
     if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}
     ++openGeneration;openAbort?.abort();openAbort=undefined;stream?.close();stream=undefined;
     if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;
@@ -513,7 +525,7 @@ function App(){
     onCleanup(()=>{document.removeEventListener("mousedown",close);document.removeEventListener("keydown",key);});
   });
   async function archive(s:Listed,archived:boolean){
-    try{await api(`/sessions/${s.id}/archive`,"POST",{archived});await refresh();if(archived&&current()?.id===s.id)startNew();}
+    try{await api(`/sessions/${s.id}/archive`,"POST",{archived});snapshots.delete(s.id);await refresh();if(archived&&current()?.id===s.id)startNew();}
     catch(e){fail(e);}
   }
 
@@ -521,6 +533,7 @@ function App(){
   let detailsReturn:HTMLElement|null=null,navReturn:HTMLElement|null=null;
   function isVisible(element:HTMLElement|null){return !!element?.isConnected&&element.getClientRects().length>0&&getComputedStyle(element).visibility!=="hidden";}
   function detailsBreakpointChanged(event:MediaQueryListEvent){
+    setOverlayNow(event.matches);
     const active=document.activeElement as HTMLElement;
     if(event.matches){
       if(detailsPanel?.contains(active)){detailsReturn=document.querySelector<HTMLElement>(".details-toggle");setDetailsOpen(true);queueMicrotask(()=>{(isVisible(active)?active:detailsTitle)?.focus();});}
@@ -820,9 +833,9 @@ function App(){
           </section>
         </div>
         <div id="panel-changes" role="tabpanel" aria-labelledby="tab-changes" class="tab-panel" hidden={detailTab()!=="changes"}>
-          <Show when={current()!.policy?.requested.mode==="parallel"&&!taskUnresolved()}><WorkerMerges id={current()!.id} workers={children().filter(a=>a.role==="worker"&&a.parentId===current()!.id)} revision={evidenceVersion().toString()} offline={offline()} rootSettled={current()!.status==="settled"} rootKind={workspaceKind(current())} onPending={setMergePending}/></Show>
-          <Show when={current()!.policy?.workspace}><Changes id={current()!.id} revision={`${current()!.approvals.filter(a=>a.change&&a.outcome).map(a=>`${a.id}:${a.outcome}`).join(",")}:${evidenceVersion()}`} canVerify={!taskUnresolved()&&"verification" in current()!.policy!.effective.profile} canTypecheck={!taskUnresolved()&&"typecheck" in current()!.policy!.effective.profile} canApply={!taskUnresolved()&&workspaceKind(current())!=="direct"&&"sourceApply" in current()!.policy!.effective.profile} workspaceKind={workspaceKind(current())}/></Show>
-          <Show when={current()!.policy?.workspace&&!taskUnresolved()&&"verification" in current()!.policy!.effective.profile}><Qa id={current()!.id} revision={evidenceVersion().toString()} askMode={askMode()}/></Show>
+          <Show when={current()!.policy?.requested.mode==="parallel"&&!taskUnresolved()}><WorkerMerges id={current()!.id} workers={children().filter(a=>a.role==="worker"&&a.parentId===current()!.id)} revision={evidenceVersion().toString()} offline={offline()} rootSettled={current()!.status==="settled"} rootKind={workspaceKind(current())} onPending={setMergePending} active={detailTab()==="changes"&&panelShown()}/></Show>
+          <Show when={current()!.policy?.workspace}><Changes id={current()!.id} revision={`${current()!.approvals.filter(a=>a.change&&a.outcome).map(a=>`${a.id}:${a.outcome}`).join(",")}:${evidenceVersion()}`} canVerify={!taskUnresolved()&&"verification" in current()!.policy!.effective.profile} canTypecheck={!taskUnresolved()&&"typecheck" in current()!.policy!.effective.profile} canApply={!taskUnresolved()&&workspaceKind(current())!=="direct"&&"sourceApply" in current()!.policy!.effective.profile} workspaceKind={workspaceKind(current())} active={detailTab()==="changes"&&panelShown()}/></Show>
+          <Show when={current()!.policy?.workspace&&!taskUnresolved()&&"verification" in current()!.policy!.effective.profile}><Qa id={current()!.id} revision={evidenceVersion().toString()} askMode={askMode()} active={detailTab()==="changes"&&panelShown()}/></Show>
           <section class="panel" tabindex="-1" aria-labelledby="h-approvals">
             <h3 id="h-approvals" class="panel-title">Approvals <span class="count">{current()!.approvals.length}</span></h3>
             <Show when={current()!.approvals.length} fallback={<p class="hint">No tool requests in this session yet. Each file operation waits for an explicit decision.</p>}>
@@ -838,7 +851,7 @@ function App(){
           </section>
         </div>
         <div id="panel-repository" role="tabpanel" aria-labelledby="tab-repository" class="tab-panel" hidden={detailTab()!=="repository"}>
-          <Repository id={current()!.id} revision={`${current()!.status}:${evidenceVersion()}`} kind={current()!.policy?.workspace?workspaceKind(current()):null} running={running()||pending().length>0} offline={offline()} onCommit={requestCommit}/>
+          <Repository id={current()!.id} revision={`${current()!.status}:${evidenceVersion()}`} kind={current()!.policy?.workspace?workspaceKind(current()):null} running={running()||pending().length>0} offline={offline()} onCommit={requestCommit} active={detailTab()==="repository"&&panelShown()}/>
         </div>
         <div id="panel-graph" role="tabpanel" aria-labelledby="tab-graph" class="tab-panel" hidden={detailTab()!=="graph"}>
           <Graph id={current()!.id} active={detailTab()==="graph"} selected={graphNode()?.id??current()!.id} waiting={Object.fromEntries(pending().map(a=>[a.agentId,a.tool]))} unsupervised={current()!.policy?.unsupervised?{[current()!.id]:agyActivity().length}:undefined} onNode={node=>void readGraphNode(node)}/>

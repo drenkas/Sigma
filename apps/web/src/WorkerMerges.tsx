@@ -5,7 +5,7 @@ import { api } from "./api.js";
 const short=(id:string)=>id.slice(0,12);
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
-export function WorkerMerges(p:{id:string;workers:AgentView[];revision:string;offline:boolean;rootSettled:boolean;rootKind:"direct"|"worktree"|"clone";onPending:(count:number)=>void}){
+export function WorkerMerges(p:{id:string;workers:AgentView[];revision:string;offline:boolean;rootSettled:boolean;rootKind:"direct"|"worktree"|"clone";onPending:(count:number)=>void;active:boolean}){
   const [changes,setChanges]=createSignal<Record<string,ChangesView>>({});
   const [changeErrors,setChangeErrors]=createSignal<Record<string,string>>({});
   const [merges,setMerges]=createSignal<WorkerMergeView[]>([]);
@@ -13,7 +13,8 @@ export function WorkerMerges(p:{id:string;workers:AgentView[];revision:string;of
   let generation=0;
 
   async function refresh(){
-    const id=p.id,workers=p.workers,version=++generation;setLoading(true);setError("");
+    // The cheap merge list always loads (it feeds the attention badge); per-worker changes only while the tab is visible.
+    const id=p.id,workers=p.active?p.workers:[],version=++generation;setLoading(true);setError("");
     const [mergeResult,...workerResults]=await Promise.allSettled([
       api<{merges:WorkerMergeView[]}>(`/sessions/${id}/worker-merges`),
       ...workers.map(worker=>api<ChangesView>(`/sessions/${worker.id}/changes`)),
@@ -55,7 +56,7 @@ export function WorkerMerges(p:{id:string;workers:AgentView[];revision:string;of
   }
   const workerMerges=(workerId:string)=>merges().filter(merge=>merge.workerId===workerId);
   const rootLabel=()=>p.rootKind==="direct"?"selected folder":p.rootKind==="worktree"?"root worktree":"root copy";
-  createEffect(()=>{p.id;p.revision;p.rootSettled;p.workers.map(worker=>`${worker.id}:${worker.status}`);void refresh();});
+  let seen=p.id;createEffect(()=>{const id=p.id;p.revision;p.rootSettled;p.active;p.workers.map(worker=>`${worker.id}:${worker.status}`);if(id!==seen){seen=id;setMerges([]);setChanges({});setChangeErrors({});setError("");}void refresh();});
   onCleanup(()=>{generation++;p.onPending(0);});
 
   return <section class="panel" tabindex="-1" aria-labelledby="h-worker-merges">

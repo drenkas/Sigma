@@ -2,7 +2,7 @@ import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
 import type { ChangesView, CheckView, EvidenceView, SourceApplyView } from "../../../packages/contracts/index.js";
 import { api } from "./api.js";
 
-export function Changes(p:{id:string;revision:string;canVerify:boolean;canTypecheck:boolean;canApply:boolean;workspaceKind:"direct"|"worktree"|"clone"}){
+export function Changes(p:{id:string;revision:string;canVerify:boolean;canTypecheck:boolean;canApply:boolean;workspaceKind:"direct"|"worktree"|"clone";active:boolean}){
   const [value,setValue]=createSignal<ChangesView|null>(null),[evidence,setEvidence]=createSignal<EvidenceView|null>(null),[applies,setApplies]=createSignal<SourceApplyView[]>([]);
   const [error,setError]=createSignal(""),[loading,setLoading]=createSignal(false),[busy,setBusy]=createSignal(false);
   const [testPath,setTestPath]=createSignal(""),[inputPaths,setInputPaths]=createSignal(""),[typeConfig,setTypeConfig]=createSignal("tsconfig.json"),[typeInputs,setTypeInputs]=createSignal("");let generation=0;
@@ -38,7 +38,7 @@ export function Changes(p:{id:string;revision:string;canVerify:boolean;canTypech
     const files=item.files.map(file=>({path:file.path,observedHash:file.observedHash??"unavailable",observedMode:file.observedMode??null,observation:file.observation??"diverged" as const}));
     void action(()=>api(`/sessions/${p.id}/source-applies/${item.id}/reconcile`,"POST",{acknowledge:true,sourceCwd:item.sourceCwd,files}));
   }
-  createEffect(()=>{p.id;p.revision;p.canVerify;p.canApply;void refresh();});onCleanup(()=>{generation++;});
+  let seen=p.id;createEffect(()=>{const id=p.id;p.revision;p.canVerify;p.canApply;if(p.active){seen=id;void refresh();}else{generation++;setLoading(false);if(id!==seen){seen=id;setValue(null);setEvidence(null);setApplies([]);setError("");}}});onCleanup(()=>{generation++;});
   const coherent=()=>!!value()&&!!evidence()&&evidence()!.revision===value()!.revision;
   const currentCheck=(check:CheckView)=>coherent()&&check.current&&check.revision===value()!.revision;
   const currentReviewer=(review:EvidenceView["reviews"][number])=>coherent()&&review.current&&review.revision===value()!.revision;
