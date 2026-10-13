@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, realpath, stat } from "node:fs/promises";
@@ -182,6 +182,37 @@ export function mutationTools(cwd:string,approve:Approve,outcome:Outcome,stopped
   });
 }
 
+// One ls-tree and one cat-file --batch for all paths; paths with an unsupported mode, an oversized blob or a missing object are absent from the result.
+async function baseBlobs(cwd:string,commit:string,paths:string[]){
+  const result=new Map<string,{bytes:Buffer;mode:string}>();if(!paths.length)return result;
+  let tree:string;try{tree=await git(cwd,["ls-tree","-z","-l",commit,"--",...paths.map(path=>`:(literal)${path}`)],16*1024*1024);}catch{return result;}
+  const found:{path:string;mode:string;oid:string}[]=[];
+  for(const record of tree.split("\0")){
+    const tab=record.indexOf("\t");if(tab<0)continue;
+    const match=/^(\d{6}) (\w+) ([0-9a-f]{40,64}) +(\d+|-)$/.exec(record.slice(0,tab));if(!match)continue;
+    const [,mode,type,oid,size]=match;
+    if(type!=="blob"||(mode!=="100644"&&mode!=="100755")||Number(size)>limit)continue;
+    found.push({path:record.slice(tab+1),mode,oid});
+  }
+  if(!found.length)return result;
+  let output:Buffer;
+  try{output=await new Promise<Buffer>((done,fail)=>{
+    const child=spawn("git",[...gitOptions,"cat-file","--batch"],{cwd,env:gitEnv as NodeJS.ProcessEnv,stdio:["pipe","pipe","ignore"],timeout:10_000}),chunks:Buffer[]=[];
+    child.stdout.on("data",chunk=>chunks.push(chunk));child.stdin.on("error",()=>{});
+    child.on("error",fail);child.on("close",code=>code===0?done(Buffer.concat(chunks)):fail(new Error("git cat-file failed")));
+    child.stdin.end(found.map(entry=>`${entry.oid}\n`).join(""));
+  });}catch{return result;}
+  let offset=0;
+  for(const entry of found){
+    const eol=output.indexOf(10,offset);if(eol<0)break;
+    const header=output.subarray(offset,eol).toString("utf8").split(" ");offset=eol+1;
+    if(header[1]==="missing")continue;
+    const size=Number(header[2]);if(header[1]!=="blob"||!Number.isSafeInteger(size)||offset+size+1>output.length)break;
+    if(size<=limit)result.set(entry.path,{bytes:output.subarray(offset,offset+size),mode:entry.mode});
+    offset+=size+1;
+  }
+  return result;
+}
 export async function workspaceChanges(cwd:string,workspace:CodeWorkspace):Promise<ChangesView>{
   await assertWorkspaceHead(cwd,workspace);
   const changed=await git(cwd,["-c","core.filemode=true","diff","--no-ext-diff","--no-textconv","--name-only","-z",workspace.baseCommit,"--"]);
@@ -191,16 +222,16 @@ export async function workspaceChanges(cwd:string,workspace:CodeWorkspace):Promi
   const visible=paths.filter(path=>!sensitivePath(path));
   if(visible.length>200)throw new Error("Too many changed files to preview (limit 200)");
   const files:string[]=[];let diff="",omitted=paths.length-visible.length;
+  const afters=new Map<string,ReturnType<typeof snapshot>>();
+  for(const path of visible)try{afters.set(path,snapshot(cwd,path));}catch{}
+  // ls-files distinguishes a new file from a failure to read a tracked Git object; base entries and blobs are read in batches.
+  const base=await baseBlobs(cwd,workspace.baseCommit,visible.filter(path=>afters.has(path)&&!newFiles.has(path)));
   for(const path of visible){
-    let after:ReturnType<typeof snapshot>;try{after=snapshot(cwd,path);}catch{omitted++;continue;}
+    const after=afters.get(path);if(!after){omitted++;continue;}
     let before:Buffer|null=null,baseMode="100644";
-    // ls-files distinguishes a new file from a failure to read a tracked Git object.
     if(!newFiles.has(path)){
-      try{
-        baseMode=(await git(cwd,["ls-tree","-z",workspace.baseCommit,"--",`:(literal)${path}`])).slice(0,6);
-        if(baseMode!=="100644"&&baseMode!=="100755")throw new Error("Unsupported Git file mode");
-        const result=await exec("git",["--no-pager","show",`${workspace.baseCommit}:${path}`],{cwd,env:gitEnv,encoding:"buffer",timeout:10_000,maxBuffer:limit});before=result.stdout;
-      }catch{omitted++;continue;}
+      const entry=base.get(path);if(!entry){omitted++;continue;}
+      before=entry.bytes;baseMode=entry.mode;
     }
     if((after.bytes===null&&(newFiles.has(path)||baseMode==="100755"))||
        (after.bytes!==null&&Boolean(after.mode&0o111)!==(baseMode==="100755"))){omitted++;continue;}

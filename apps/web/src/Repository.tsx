@@ -11,7 +11,7 @@ function summary(f:FolderStatus){
   return parts.length?parts.join(" · "):"Clean";
 }
 
-export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"|"clone"|null;running:boolean;offline:boolean;onCommit:()=>void}){
+export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"|"clone"|null;running:boolean;offline:boolean;onCommit:()=>void;active:boolean}){
   const [value,setValue]=createSignal<SessionRepositoryView|null>(null),[error,setError]=createSignal(""),[loading,setLoading]=createSignal(false);
   const [recoveries,setRecoveries]=createSignal<Array<{id:string;kind:string;head:string|null;tree:string|null;expectedHead:string|null;expectedTree:string|null;state:string;reason?:string;digest:string;canReconcile:boolean}>>([]);
   const [busy,setBusy]=createSignal<string|null>(null),[result,setResult]=createSignal("");
@@ -22,7 +22,7 @@ export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"
     catch(e){if(version===generation){setValue(null);setError(e instanceof Error?e.message:"Cannot read Git status");}}
     finally{if(version===generation)setLoading(false);}
   }
-  createEffect(()=>{p.id;p.revision;setResult("");void refresh();});onCleanup(()=>{generation++;});
+  let seen=p.id;createEffect(()=>{const id=p.id;p.revision;if(p.active){seen=id;setResult("");void refresh();}else{generation++;setLoading(false);if(id!==seen){seen=id;setValue(null);setRecoveries([]);setError("");setResult("");}}});onCleanup(()=>{generation++;});
   async function act(action:"switch"|"pull"|"push",body:object={}){
     setBusy(action);setError("");setResult("");
     try{const data=await api<{output:string}>(`/sessions/${p.id}/git/${action}`,"POST",body,crypto.randomUUID());setResult(action==="switch"?"Branch switched.":data.output?data.output.split("\n").slice(-2).join(" "):action==="pull"?"Already up to date.":"Pushed.");}

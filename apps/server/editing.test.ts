@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, writeFile, symlink, link, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile, symlink, link, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { PiHost } from "./pi-host.js";
-import { mutationTools } from "./editing.js";
+import { createCodeWorkspace, mutationTools, workspaceChanges } from "./editing.js";
 import { SourceApply } from "./source-apply.js";
 import { Storage } from "./storage.js";
 import { Verification } from "./verification.js";
@@ -137,4 +137,24 @@ test("edit and write run sequentially so parallel calls in one turn never see ea
       assert.equal(session.agent.state.tools.find((tool:any)=>tool.name===name).executionMode,"sequential",`${name} agent tool makes the whole batch sequential`);
     }
   }finally{await host.close();await storage.close();}
+});
+
+test("workspace changes read base files in batches and keep per-file omission rules",async()=>{
+  const source=join(fixture,"batch-source"),data=join(fixture,"batch-data");await mkdir(join(source,"dir"),{recursive:true});await mkdir(data);
+  await git(source,"init","-b","main");
+  const base:[string,string|Buffer][]=[["a.txt","a\n"],["b.txt","b1\nb2\n"],["gone.txt","gone\n"],["run.sh","#!/bin/sh\necho 1\n"],["flip.txt","flip\n"],["huge.txt",Buffer.alloc(200*1024,"x")],["dir/with space.txt","one\n"],["same.txt","same\n"]];
+  for(const [path,content] of base)await writeFile(join(source,path),content);
+  await chmod(join(source,"run.sh"),0o755);await git(source,"add",".");await git(source,"commit","-m","Fixture");
+  const {cwd,workspace}=await createCodeWorkspace(source,data,crypto.randomUUID(),undefined,"direct");
+  assert.equal((await workspaceChanges(cwd,workspace)).diff,"");
+  await writeFile(join(source,"a.txt"),"A\n");await writeFile(join(source,"b.txt"),"b1\nb2\nb3\n");await rm(join(source,"gone.txt"));
+  await writeFile(join(source,"run.sh"),"#!/bin/sh\necho 2\n");await chmod(join(source,"flip.txt"),0o755);await writeFile(join(source,"huge.txt"),"small\n");
+  await writeFile(join(source,"dir/with space.txt"),"two\n");await writeFile(join(source,"new.txt"),"new\n");await writeFile(join(source,"new-huge.txt"),Buffer.alloc(200*1024,"y"));await writeFile(join(source,".env"),"SECRET=1\n");
+  const view=await workspaceChanges(cwd,workspace);
+  // flip.txt (mode change) and huge.txt (base blob over 128 KiB) are omitted, as are new-huge.txt (too large to read) and the sensitive .env.
+  assert.deepEqual(view.files,["a.txt","b.txt","dir/with space.txt","gone.txt","run.sh","new.txt"]);
+  assert.equal(view.omitted,4);
+  for(const needle of ['"a/a.txt"','-a\n+A\n','+b3\n','"a/dir/with space.txt"','-one\n+two\n','deleted file mode 100644\n--- "a/gone.txt"','-echo 1\n+echo 2\n','new file mode 100644\n--- /dev/null\t\n+++ "b/new.txt"'])assert.ok(view.diff.includes(needle),needle);
+  for(const absent of ["huge.txt","flip.txt","same.txt",".env"])assert.ok(!view.diff.includes(`"b/${absent}"`)&&!view.diff.includes(`"a/${absent}"`),absent);
+  assert.equal((await workspaceChanges(cwd,workspace)).revision,view.revision);
 });

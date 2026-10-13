@@ -3,7 +3,7 @@ import type { QaActionView, QaGateView, QaRunView, QaView } from "../../../packa
 import { api } from "./api.js";
 
 const live=(run:QaRunView)=>run.status==="starting"||run.status==="running";
-export function Qa(p:{id:string;revision:string;askMode?:boolean}){
+export function Qa(p:{id:string;revision:string;askMode?:boolean;active:boolean}){
   const [view,setView]=createSignal<QaView|null>(null),[gate,setGate]=createSignal<QaGateView|null>(null),[error,setError]=createSignal(""),[busy,setBusy]=createSignal(false),[entry,setEntry]=createSignal("index.html");let generation=0;
   async function refresh(){
     const id=p.id,version=++generation;
@@ -13,7 +13,7 @@ export function Qa(p:{id:string;revision:string;askMode?:boolean}){
   async function action(run:()=>Promise<unknown>){setBusy(true);setError("");try{await run();await refresh();}catch(e){setError(e instanceof Error?e.message:"QA action failed");}finally{setBusy(false);}}
   const start=()=>void action(()=>api(`/sessions/${p.id}/qa/runs`,"POST",{entry:entry().trim()},crypto.randomUUID()));
   const cancel=(run:QaRunView)=>void action(()=>api(`/sessions/${p.id}/qa/runs/${run.id}/cancel`,"POST",{}));
-  createEffect(()=>{p.id;p.revision;void refresh();});onCleanup(()=>{generation++;});
+  let seen=p.id;createEffect(()=>{const id=p.id;p.revision;if(p.active){seen=id;void refresh();}else{generation++;if(id!==seen){seen=id;setView(null);setGate(null);setError("");}}});onCleanup(()=>{generation++;});
   const actionsOf=(run:QaRunView):QaActionView[]=>view()?.actions.filter(a=>a.runId===run.id)??[];
   const shots=(run:QaRunView)=>view()?.artifacts.filter(a=>a.runId===run.id)??[];
   return <section class="panel" aria-labelledby="h-qa">
