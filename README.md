@@ -254,7 +254,7 @@ The Rust toolchain and Cargo cache are required (see [section 2](#2-requirements
    npm run desktop:build
    ```
 
-   The build bundles CLIProxyAPI automatically when `.data/cliproxyapi/bin/CLIProxyAPI-8.0.13` exists (its sha256 is verified). That file appears after Sigma has been started once from source (`npm start`) with the binary available. The build prints `CLIProxyAPI CLIProxyAPI-8.0.13 staged ... (sha256 ...)` when it is bundled, or `No SIGMA_CLIPROXY_BINARY and no provisioned ...: CLIProxyAPI not staged` otherwise, in which case the app shows `not_installed`.
+   The build bundles CLIProxyAPI automatically when `.data/cliproxyapi/bin/CLIProxyAPI-8.0.13` exists (its sha256 is verified). That file appears after Sigma has been started once from source (`npm start`) with the binary available. The build prints `CLIProxyAPI CLIProxyAPI-8.0.13 staged ... (sha256 ...)` when it is bundled, or `No SIGMA_CLIPROXY_BINARY and no provisioned ...: CLIProxyAPI not staged` otherwise. `npm run desktop:build` then stops before building the app, because a build without the proxy would show `not_installed`; `npm run desktop:dev` still runs without it.
 
    `SIGMA_CLIPROXY_BINARY` is only an override for a binary stored elsewhere, for example:
 

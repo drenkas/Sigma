@@ -254,7 +254,7 @@ Sigma підтримує лише три родини провайдерів: Op
    npm run desktop:build
    ```
 
-   Збірка автоматично додає CLIProxyAPI в bundle, якщо існує `.data/cliproxyapi/bin/CLIProxyAPI-8.0.13` (sha256 перевіряється). Цей файл з'являється після одного запуску Sigma з source (`npm start`) за наявності binary. Збірка друкує `CLIProxyAPI CLIProxyAPI-8.0.13 staged ... (sha256 ...)`, якщо binary додано, або `No SIGMA_CLIPROXY_BINARY and no provisioned ...: CLIProxyAPI not staged` інакше; тоді app показує `not_installed`.
+   Збірка автоматично додає CLIProxyAPI в bundle, якщо існує `.data/cliproxyapi/bin/CLIProxyAPI-8.0.13` (sha256 перевіряється). Цей файл з'являється після одного запуску Sigma з source (`npm start`) за наявності binary. Збірка друкує `CLIProxyAPI CLIProxyAPI-8.0.13 staged ... (sha256 ...)`, якщо binary додано, або `No SIGMA_CLIPROXY_BINARY and no provisioned ...: CLIProxyAPI not staged` інакше. Тоді `npm run desktop:build` зупиняється ще до збірки app, бо збірка без proxy показувала б `not_installed`; `npm run desktop:dev` працює і без нього.
 
    `SIGMA_CLIPROXY_BINARY` потрібен лише як override для binary в іншому місці, наприклад:
 

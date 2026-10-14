@@ -8,6 +8,12 @@ const tauri = join(root, "node_modules/.bin/tauri");
 const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, ".scratch/native-cargo-target");
 const config = JSON.parse(await readFile(join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
 const environment = { ...process.env, CARGO_TARGET_DIR: target };
+// A shipped build must carry the pinned CLIProxyAPI: without it the app reports not_installed and only the packaged gate notices.
+const manifest = JSON.parse(await readFile(join(root, ".scratch/desktop-runtime/MANIFEST.json"), "utf8"));
+if (!manifest.cliproxyapi) {
+  console.error("CLIProxyAPI is not staged in .scratch/desktop-runtime, so this build would ship without the proxy. Provision .data/cliproxyapi/bin/CLIProxyAPI-8.0.13 (start Sigma from source once) or set SIGMA_CLIPROXY_BINARY to a CLIProxyAPI 8.0.13 binary, then run npm run desktop:build again.");
+  process.exit(1);
+}
 const build = spawnSync(tauri, ["build", "--bundles", "app"], {
   cwd: root,
   env: environment,

@@ -19,10 +19,10 @@ Every merge into `main` that brings a new version is followed right away, as par
    ```sh
    git fetch origin && git worktree add ../sigma-release origin/main && cd ../sigma-release
    npm ci
-   npm run desktop:build      # signed Sigma.app + release/Sigma_<v>_aarch64.dmg
+   SIGMA_CLIPROXY_BINARY=<main checkout>/.data/cliproxyapi/bin/CLIProxyAPI-8.0.13 npm run desktop:build      # signed Sigma.app + release/Sigma_<v>_aarch64.dmg
    SIGMA_RELEASE_NOTES="..." npm run release:prepare   # release/Sigma_<v>_aarch64.app.tar.gz (+ .sig) and release/latest.json
    ```
-   `release:prepare` signs the update archive with the updater key at `~/.tauri/sigma-updater.key` (override with `TAURI_SIGNING_PRIVATE_KEY_PATH`; never commit it) and uploads nothing.
+   A clean worktree has no `.data/cliproxyapi`, so point `SIGMA_CLIPROXY_BINARY` at the provisioned binary (its sha256 is checked); `desktop:build` fails when no CLIProxyAPI binary is staged. `release:prepare` signs the update archive with the updater key at `~/.tauri/sigma-updater.key` (override with `TAURI_SIGNING_PRIVATE_KEY_PATH`; never commit it) and uploads nothing.
 2. Publish the release, tag `v<version>`, title `Sigma <version>`, marked Latest, with exactly these three assets:
    ```sh
    gh release create v<version> --repo drenkas/Sigma --target <origin/main sha> --title "Sigma <version>" --notes "..." --latest \
