@@ -26,7 +26,7 @@ import { registerClaudeProvider } from "./claude-provider.js";
 import { ProviderAuth } from "./provider-auth.js";
 import { CliproxyProvider, CLIPROXY_PROVIDER_ID } from "./cliproxy-provider.js";
 import { geminiNonFlash, previousGeneration } from "./model-generations.js";
-import type { WorkStep, RoleCatalog, RoleReasoning, RoleType, SessionRole, WorkspaceSetup, WorkspaceRecoveryItem } from "../../packages/contracts/index.js";
+import type { ChangesView, WorkStep, WorkView, RoleCatalog, RoleReasoning, RoleType, SessionRole, WorkspaceSetup, WorkspaceRecoveryItem } from "../../packages/contracts/index.js";
 
 /** Short, user-facing target of a tool call: a cwd-relative path, the commit subject or the delegated role. */
 function toolDetail(cwd:string,tool:string,args:any):string|undefined{
@@ -108,6 +108,20 @@ function readPiHistory(path:string,managerDir:string,managerId:string|null,cwd:s
 }
 
 const delegateDescription=(profile:{maxDepth:number;childTimeoutMs:number})=>`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${profile.childTimeoutMs/1000}s timeout. Child work is not automatically verified.`;
+
+// Snapshots are read on every chat switch and after every reply; rebuild the visible messages only when the history changed.
+// Pi appends finished messages (message_end) and replaces the array on compaction, so array, length, last message and entry count identify a version.
+const visibleCache=new WeakMap<AgentSession,{messages:unknown;length:number;last:unknown;entries:number;cwd:string;view:SessionView["messages"]}>();
+export function cachedVisibleMessages(session:AgentSession,cwd:string):SessionView["messages"]{
+  const messages=session.messages as unknown[],entries=Number((session as any).sessionManager?.fileEntries?.length??-1),hit=visibleCache.get(session);
+  if(hit&&hit.messages===messages&&hit.length===messages.length&&hit.last===messages[messages.length-1]&&hit.entries===entries&&hit.cwd===cwd&&entries>=0)return hit.view;
+  const view=visibleMessages(session,cwd);visibleCache.set(session,{messages,length:messages.length,last:messages[messages.length-1],entries,cwd,view});return view;
+}
+/** Keeps the work steps of the latest turn only; earlier turns carry `stepCount` and are read on demand. Returns new message objects, never mutates the cached view. */
+export function trimWorkSteps(messages:SessionView["messages"]):SessionView["messages"]{
+  let last=-1;for(let i=messages.length-1;i>=0;i--)if(messages[i].role==="user"){last=i;break;}
+  return messages.map((message,index)=>message.work&&index!==last&&message.work.steps.length?{...message,work:{startedAt:message.work.startedAt,endedAt:message.work.endedAt,steps:[],stepCount:message.work.steps.length}}:message);
+}
 
 export function visibleMessages(session:AgentSession,cwd:string):SessionView["messages"] {
   const out:SessionView["messages"]=[],results=new Map<string,boolean>();
@@ -702,10 +716,20 @@ export class PiHost {
       await this.syncGit(row.cwd,intent.identity.head,view.head!);return view;
     }).finally(()=>this.gitReservations.delete(row.cwd));
   }
-  async changes(id:string){
-    const row=await this.storage.call<RecordRow|undefined>("session",{id});
-    if(!row?.policy?.workspace)throw new Error("Session has no code workspace");
-    return workspaceChanges(row.cwd,row.policy.workspace);
+  /** Counts session events (set by the server). A shared changes read is reused only while no event arrived since it started. */
+  eventEpoch:()=>number=()=>Number.NaN;
+  private changeReads=new Map<string,{epoch:number;work:Promise<ChangesView>}>();
+  /** `shared`: read-only views opened together (Changes, evidence, QA) reuse one in-flight Git read instead of each running their own. */
+  changes(id:string,options:{shared?:boolean}={}):Promise<ChangesView>{
+    const epoch=this.eventEpoch(),flight=options.shared?this.changeReads.get(id):undefined;
+    if(flight&&flight.epoch===epoch)return flight.work;
+    const work=(async()=>{
+      const row=await this.storage.call<RecordRow|undefined>("session",{id});
+      if(!row?.policy?.workspace)throw new Error("Session has no code workspace");
+      return workspaceChanges(row.cwd,row.policy.workspace);
+    })();
+    if(options.shared&&!Number.isNaN(epoch)){this.changeReads.set(id,{epoch,work});const done=()=>{if(this.changeReads.get(id)?.work===work)this.changeReads.delete(id);};work.then(done,done);}
+    return work;
   }
   async assertDirectReady(row:RecordRow,includeMerges=false,exceptApprovalId?:string){
     const cwd=await realpath(row.cwd);
@@ -1043,12 +1067,22 @@ export class PiHost {
       }finally{if(!completed)await this.storage.call("releaseTaskContinuation",{id:task.id});}
     });
   }
-  async snapshot(id:string):Promise<SessionView>{
+  /** `steps:"latest"` leaves the work steps of earlier turns out (the chat view reads them on demand with `workSteps`). */
+  async snapshot(id:string,options:{steps?:"all"|"latest"}={}):Promise<SessionView>{
     const cursor=await this.storage.call<number>("latest",{sessionId:id});
     const {session,row}=await this.get(id);const approvals=await this.storage.call<ApprovalView[]>("approvals",{sessionId:id});
     const agents=(await this.storage.call<Array<RecordRow&{revisionReviewer:boolean}>>("agents",{rootId:id})).map((item):AgentView=>({id:item.id,parentId:item.parentId,role:item.role,status:item.status,model:item.model,cwd:item.cwd,revisionReviewer:item.revisionReviewer}));
-    const messages=visibleMessages(session,row.cwd),[recoveryInputs,recoveryActions]=await Promise.all([this.storage.call<RecoveryInput[]>("recoveryInputs",{sessionId:id}),this.storage.call<RecoveryAction[]>("recoveryActions",{sessionId:id})]);
+    const visible=cachedVisibleMessages(session,row.cwd),messages=options.steps==="latest"?trimWorkSteps(visible):visible,[recoveryInputs,recoveryActions]=await Promise.all([this.storage.call<RecoveryInput[]>("recoveryInputs",{sessionId:id}),this.storage.call<RecoveryAction[]>("recoveryActions",{sessionId:id})]);
     return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status,cursor,agents,approvals,recoveryInputs,recoveryActions,messages,archivedAt:await this.storage.call<number|null>("ownerArchivedAt",{id})};
+  }
+  /** The open session's saved state without building its messages: for routes that only check existence, folder, policy or run status. */
+  async state(id:string):Promise<Pick<SessionView,"id"|"cwd"|"model"|"policy"|"status">>{
+    const {row}=await this.get(id);return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status};
+  }
+  /** Work steps of one turn (the user message ID from `snapshot`); undefined when that message has none. */
+  async workSteps(id:string,messageId:string):Promise<WorkView|undefined>{
+    const {session,row}=await this.get(id);
+    return cachedVisibleMessages(session,row.cwd).find(message=>message.id===messageId)?.work;
   }
   /** One image of one user message (the message id from `snapshot`, the 0-based image position); undefined when it does not exist. */
   async messageImage(id:string,messageId:string,position:number):Promise<{mimeType:string;data:Buffer}|undefined>{
@@ -1070,7 +1104,7 @@ export class PiHost {
   }
   async childSnapshot(rootId:string,childId:string){
     await this.storage.call("descendantMember",{rootId,agentId:childId});
-    return this.snapshot(childId);
+    return this.snapshot(childId,{steps:"latest"});
   }
   async archiveOwner(id:string,archived:boolean,taskOwner=false){
     const task=taskOwner?await this.storage.call<ProjectTaskView|undefined>("projectTask",{id}):undefined;

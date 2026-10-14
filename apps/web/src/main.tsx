@@ -62,6 +62,26 @@ const elapsed=(ms:number)=>{const t=Math.max(0,Math.floor(ms/1000)),h=Math.floor
 type ToolStep=Extract<WorkStep,{kind:"tool"}>;
 type WorkItem={kind:"note";text:string}|{kind:"thinking";text:string}|{kind:"tools";calls:ToolStep[]};
 const groupWork=(steps:WorkStep[]):WorkItem[]=>{const out:WorkItem[]=[];for(const st of steps){if(st.kind!=="tool")out.push(st);else{const last=out[out.length-1];if(last?.kind==="tools")last.calls.push(st);else out.push({kind:"tools",calls:[st]});}}return out;};
+// Fresh snapshots replace every message object; keeping the unchanged ones lets <For> re-render only what changed.
+type ChatMessage=SessionView["messages"][number];
+const stepTotal=(w:WorkView)=>w.stepCount??w.steps.length;
+const sameWork=(a?:WorkView,b?:WorkView)=>{
+  if(!a||!b)return a===b;
+  if(a.startedAt!==b.startedAt||a.endedAt!==b.endedAt||stepTotal(a)!==stepTotal(b))return false;
+  return !b.steps.length||a.steps.length===b.steps.length&&JSON.stringify(a.steps)===JSON.stringify(b.steps);
+};
+const sameMessage=(a:ChatMessage,b:ChatMessage)=>{
+  const keys=Object.keys(a) as Array<keyof ChatMessage>;if(keys.length!==Object.keys(b).length)return false;
+  return keys.every(key=>key==="work"?sameWork(a.work,b.work):a[key]===b[key]||typeof a[key]==="object"&&a[key]!==null&&JSON.stringify(a[key])===JSON.stringify(b[key]));
+};
+function keepMessages(previous:ChatMessage[]|undefined,fresh:ChatMessage[]):ChatMessage[]{
+  if(!previous?.length)return fresh;
+  const byId=new Map(previous.map(m=>[m.id,m]));let changed=previous.length!==fresh.length;
+  const out=fresh.map((m,i)=>{const old=byId.get(m.id);const keep=old&&sameMessage(old,m)?old:m;if(keep!==previous[i])changed=true;return keep;});
+  return changed?out:previous;
+}
+// A chat opens with its latest messages only; older ones render as the reader scrolls up (each rendered message costs layout and Markdown work on every switch).
+const CHAT_PAGE=50;
 const TOOL_VERB:Record<string,string>={read:"Read",ls:"Listed",find:"Explored",grep:"Searched",edit:"Edited",write:"Edited",bash:"Ran",delegate:"Delegated to",git_commit:"Committed"};
 const toolSummary=(calls:ToolStep[])=>{
   if(calls.length===1){const c=calls[0],verb=TOOL_VERB[c.tool];if(c.tool==="ls"&&(!c.detail||c.detail==="."))return "Listed files";if(c.detail&&verb)return `${verb} ${c.detail}`;}
@@ -138,7 +158,7 @@ function App(){
   const [switching,setSwitching]=createSignal(false);
   const [workspaceMode,setWorkspaceMode]=createSignal<"direct"|"worktree">("direct"),[access,setAccess]=createSignal<"full"|"ask">("full"),[thinking,setThinking]=createSignal<string[]>([]);
   const [workspace,setWorkspace]=createSignal(""),[selectedModel,setSelectedModel]=createSignal(""),[reasoning,setReasoning]=createSignal(""),[prompt,setPrompt]=createSignal(""),[draft,setDraft]=createSignal(""),[attachments,setAttachments]=createSignal<Attachment[]>([]),[dragging,setDragging]=createSignal(false);
-  const [notice,setNotice]=createSignal<Notice|null>(null),[busy,setBusy]=createSignal(false),[tools,setTools]=createSignal<Tool[]>([]),[agyActivity,setAgyActivity]=createSignal<AgyRecord[]>([]),[shown,setShown]=createSignal(200);
+  const [notice,setNotice]=createSignal<Notice|null>(null),[busy,setBusy]=createSignal(false),[tools,setTools]=createSignal<Tool[]>([]),[agyActivity,setAgyActivity]=createSignal<AgyRecord[]>([]),[shown,setShown]=createSignal(CHAT_PAGE);
   const [conn,setConn]=createSignal<Conn>("connecting"),[attempt,setAttempt]=createSignal(0),[booted,setBooted]=createSignal(false);
   const [loadingId,setLoadingId]=createSignal<string|null>(null),[openFailed,setOpenFailed]=createSignal<{id:string;text:string}|null>(null);
   const [refreshing,setRefreshing]=createSignal(false),[deciding,setDeciding]=createSignal<string[]>([]),[queued,setQueued]=createSignal<{id:string;count:number}|null>(null);
@@ -196,7 +216,8 @@ function App(){
   const attention=()=>pending().length+mergePending()+(current()?.recoveryInputs.length||0)+(current()?.recoveryActions.length||0)+childTrouble().filter(a=>a.status==="error").length;
   const listed=()=>sessions().find(s=>s.id===current()?.id);
   const sessionTitle=(s:Listed)=>s.title?firstLine(plainMentions(s.title),64):"Untitled session";
-  const duplicate=(s:Listed)=>sessions().some(o=>o.id!==s.id&&sessionTitle(o)===sessionTitle(s));
+  const titleCounts=createMemo(()=>{const counts=new Map<string,number>();for(const s of sessions()){const t=sessionTitle(s);counts.set(t,(counts.get(t)??0)+1);}return counts;});
+  const duplicate=(s:Listed)=>(titleCounts().get(sessionTitle(s))??0)>1;
   const currentTitle=()=>{const first=current()?.messages.find(m=>m.role==="user");return first?firstLine(plainMentions(first.text)||"Image",90):listed()?.title?firstLine(plainMentions(listed()!.title!),90):"Untitled session";};
   const running=()=>current()?.status==="running";
   const composing=()=>!showProjects()&&!showRoles()&&!showProviders()&&!current()&&!loadingId()&&!openFailed()&&!focusedTask();
@@ -260,7 +281,8 @@ function App(){
   }
   onCleanup(()=>{document.body.style.userSelect="";});
 
-  async function refresh(){const data=await api<{sessions:Listed[]}>("/sessions");setSessions(data.sessions);}
+  // The list is polled while chats run; unchanged rows keep their objects so the sidebar re-renders only rows that changed.
+  async function refresh(){const data=await api<{sessions:Listed[]}>("/sessions");setSessions(previous=>{const byId=new Map(previous.map(s=>[s.id,s]));return data.sessions.map(s=>{const old=byId.get(s.id);return old&&JSON.stringify(old)===JSON.stringify(s)?old:s;});});}
   async function refreshTasks(){const data=await api<{tasks:ProjectTaskView[]}>("/project-tasks");setProjectTasks(data.tasks);}
   async function refreshWorkspaceRecovery(){const data=await api<{items:WorkspaceRecoveryItem[]}>("/workspace-recovery");setWorkspaceRecovery(data.items);}
   async function continueWorkspaceSetup(item:WorkspaceRecoveryItem){setRecoveryBusy(item.id);try{const result=await api<{id:string;rootId:string}>(`/workspace-recovery/${encodeURIComponent(item.id)}/continue`,"POST",{observedRevision:item.observedRevision});await Promise.all([refresh(),refreshWorkspaceRecovery()]);await select(result.rootId);setNotice({kind:"info",text:"Workspace setup recovered. The original input was not rerun."});if(result.id!==result.rootId){setSelectedChildId(result.id);await refreshChild(result.rootId,result.id);setDetailsOpen(true);setDetailTab("overview");}}catch(e){fail(e);void refreshWorkspaceRecovery().catch(()=>{});}finally{setRecoveryBusy(null);}}
@@ -315,7 +337,7 @@ function App(){
     const generation=++openGeneration;openAbort?.abort();const ctl=openAbort=new AbortController();let timedOut=false;
     if(current()?.id!==id&&openFailed()?.id!==current()?.id)remember(current());
     if(current()?.id!==id){++graphReadGeneration;setGraphNode(null);setGraphHistory(null);setGraphHistoryError("");setSelectedChildId(null);setChildView(null);setChildText("");setMergePending(0);}
-    stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(200);if(current()?.id!==id&&conn()!=="reconnecting")setConn("connecting");setLoadingId(id);setOpenFailed(null);
+    stream?.close();if(reconnectTimer)clearTimeout(reconnectTimer);if(historyTimer)clearTimeout(historyTimer);reconnectTimer=historyTimer=undefined;cursor=0;setDraft("");setThinking([]);setTools([]);setAgyActivity([]);setShown(CHAT_PAGE);if(current()?.id!==id&&conn()!=="reconnecting")setConn("connecting");setLoadingId(id);setOpenFailed(null);
     if(queued()?.id!==id)setQueued(null);
     const cached=snapshots.get(id);
     if(cached&&current()?.id!==id){
@@ -328,7 +350,7 @@ function App(){
     finally{clearTimeout(timer);if(openAbort===ctl)openAbort=undefined;}
     if(generation!==openGeneration)return;setOpenFailed(null);remember(snapshot);
     if(current()?.id!==id){if(current()){prompts.set(current()!.id,prompt());attachmentDrafts.set(current()!.id,attachments());}setPrompt(prompts.get(id)||"");setAttachments(attachmentDrafts.get(id)||[]);}
-    cursor=snapshot.cursor;stick=true;setCurrent(snapshot);setLoadingId(null);setSessions(x=>x.map(s=>s.id===id?{...s,status:snapshot.status}:s));setNotice(null);reconcilePrompt(snapshot);
+    cursor=snapshot.cursor;stick=true;{const shown=current()?.id===id?current()!.messages:undefined,messages=keepMessages(shown,snapshot.messages);if(messages!==snapshot.messages){snapshot={...snapshot,messages};remember(snapshot);}}setCurrent(snapshot);setLoadingId(null);setSessions(x=>x.map(s=>s.id===id?{...s,status:snapshot.status}:s));setNotice(null);reconcilePrompt(snapshot);
     if(selectedChildId())void refreshChild(id,selectedChildId()!);
     if(snapshot.status!=="running")setQueued(null);
     if(conn()!=="reconnecting")setConn("connecting");
@@ -336,7 +358,7 @@ function App(){
     let historyVersion=0;
     const sync=()=>{const version=++historyVersion;if(historyTimer)clearTimeout(historyTimer);historyTimer=setTimeout(async()=>{
       historyTimer=undefined;
-      try{const latest=await api<SessionView>(`/sessions/${id}`);if(generation===openGeneration&&version===historyVersion){setCurrent(x=>x?.id===id?{...x,messages:latest.messages,recoveryInputs:latest.recoveryInputs,recoveryActions:latest.recoveryActions}:x);reconcilePrompt(latest);}}catch{/* reconnect retries */}
+      try{const latest=await api<SessionView>(`/sessions/${id}`);if(generation===openGeneration&&version===historyVersion){setCurrent(x=>x?.id===id?{...x,messages:keepMessages(x.messages,latest.messages),recoveryInputs:latest.recoveryInputs,recoveryActions:latest.recoveryActions}:x);reconcilePrompt(latest);}}catch{/* reconnect retries */}
     },20);};
     stream.onopen=()=>{if(generation===openGeneration){setConn("live");setAttempt(0);}};
     stream.onmessage=(event_)=>{
@@ -378,12 +400,17 @@ function App(){
       reconnectTimer=setTimeout(()=>{void recover();},1000);
     };
   }
+  // Adds older messages above the visible ones and keeps the reader's place (the scroller has no scroll anchoring).
+  function showOlder(){
+    if(!scroller)return;const height=scroller.scrollHeight,top=scroller.scrollTop;stick=false;
+    setShown(x=>x+CHAT_PAGE);scroller.scrollTop=top+scroller.scrollHeight-height;
+  }
   // After a prompt, keep the live stream (deltas are not durable) and only merge fresh history.
   async function resync(id:string){
     if(current()?.id!==id)return;
     if(!stream||stream.readyState===EventSource.CLOSED){await open(id);return;}
     const latest=await api<SessionView>(`/sessions/${id}`);stick=true;
-    setCurrent(x=>x?.id===id?{...x,messages:latest.messages,recoveryInputs:latest.recoveryInputs,recoveryActions:latest.recoveryActions}:x);
+    setCurrent(x=>x?.id===id?{...x,messages:keepMessages(x.messages,latest.messages),recoveryInputs:latest.recoveryInputs,recoveryActions:latest.recoveryActions}:x);
   }
   async function refreshWriteRecovery(id:string){
     const latest=await api<SessionView>(`/sessions/${id}`);
@@ -887,10 +914,21 @@ function App(){
   const workLive=()=>current()?.status==="running"&&(!graphNode()||graphNode()!.id===current()?.id);
   const [openWork,setOpenWork]=createSignal<Record<string,boolean>>({});
   const lastUserId=createMemo(()=>[...(conversation()?.messages??[])].reverse().find(m=>m.role==="user")?.id);
+  // Steps of earlier turns are not in the snapshot (stepCount only); they load when the block is expanded.
+  const [loadedSteps,setLoadedSteps]=createSignal<Record<string,WorkStep[]|"loading"|"failed">>({});
+  // Keyed by turn start too: message IDs are positions in the Pi history, which compaction can renumber.
+  const stepsKey=(sessionId:string|undefined,messageId:string,work?:WorkView)=>`${sessionId}:${messageId}:${work?.startedAt}`;
+  async function loadSteps(sessionId:string,messageId:string,work?:WorkView){
+    const key=stepsKey(sessionId,messageId,work);setLoadedSteps(x=>({...x,[key]:"loading"}));
+    try{const data=await api<{steps:WorkStep[]}>(`/sessions/${sessionId}/messages/${encodeURIComponent(messageId)}/work`);setLoadedSteps(x=>({...x,[key]:data.steps}));}
+    catch{setLoadedSteps(x=>({...x,[key]:"failed"}));}
+  }
   const WorkBlock=(p:{id:string;work?:WorkView;at?:number;live?:boolean})=>{
     const mountedAt=Date.now(),[now,setNow]=createSignal(Date.now());
     createEffect(()=>{if(!p.live)return;setNow(Date.now());const t=setInterval(()=>setNow(Date.now()),1000);onCleanup(()=>clearInterval(t));});
-    const start=()=>p.work?.startedAt||p.at||mountedAt,steps=()=>p.work?.steps??[],open=()=>openWork()[p.id]??!!p.live;
+    const sessionId=()=>conversation()?.id,loaded=()=>loadedSteps()[stepsKey(sessionId(),p.id,p.work)],deferred=()=>!!p.work?.stepCount&&!p.work.steps.length;
+    const start=()=>p.work?.startedAt||p.at||mountedAt,steps=()=>deferred()?(Array.isArray(loaded())?loaded() as WorkStep[]:[]):p.work?.steps??[],open=()=>openWork()[p.id]??!!p.live;
+    createEffect(()=>{const id=sessionId();if(open()&&deferred()&&id&&loaded()===undefined)void loadSteps(id,p.id,p.work);});
     const ms=()=>p.live?now()-start():Math.max(0,(p.work?.endedAt??0)-(p.work?.startedAt??0)),items=createMemo(()=>groupWork(steps()));
     const activity=()=>{
       if(pending().length)return "Waiting for your approval";
@@ -903,6 +941,7 @@ function App(){
     return <div class="work" classList={{live:p.live}}>
       <button class="work-head" aria-expanded={open()} onClick={()=>setOpenWork(x=>({...x,[p.id]:!open()}))}><span class="chevron" classList={{open:open()}}><Icon name="chevron"/></span>{p.live?"Working":"Worked"} for {elapsed(ms())}</button>
       <Show when={open()}><div class="work-steps">
+        <Show when={deferred()&&!Array.isArray(loaded())}><p class="muted small">{loaded()==="failed"?<>Steps could not be loaded. <button class="btn ghost sm" onClick={()=>void loadSteps(sessionId()!,p.id,p.work)}>Try again</button></>:"Loading steps…"}</p></Show>
         <For each={items()}>{item=>item.kind==="note"?<div class="work-note">{item.text}</div>
           :item.kind==="thinking"?<details class="work-row"><summary>Thought</summary><div class="work-thought">{item.text}</div></details>
           :<details class="work-row"><summary title={toolSummary(item.calls)}><span class="truncate">{toolSummary(item.calls)}</span><Show when={item.calls.some(c=>c.status==="error")}><span class="work-err" title="A call failed">failed</span></Show></summary>
@@ -978,9 +1017,9 @@ function App(){
         </div>
       </Show>
     </>}>
-      <div class="scroller" ref={scroller} onScroll={()=>{if(scroller)stick=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80;}}>
+      <div class="scroller" ref={scroller} onScroll={()=>{if(!scroller)return;stick=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80;if(scroller.scrollTop<400&&conversation()!.messages.length>shown())showOlder();}}>
         <div class="thread" aria-live="off">
-          <Show when={current()!.messages.length>shown()}><button class="btn ghost sm older" onClick={()=>{stick=false;setShown(x=>x+200);}}>Load 200 older messages</button></Show>
+          <Show when={conversation()!.messages.length>shown()}><button class="btn ghost sm older" onClick={showOlder}>Load older messages</button></Show>
           <Show when={!current()!.messages.length&&!draft()&&current()!.status!=="running"}>
             <div class="thread-empty">
               <h2>What should the agents work on?</h2>

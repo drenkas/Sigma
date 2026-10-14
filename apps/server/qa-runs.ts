@@ -22,7 +22,7 @@ export interface QaHost{
   verifiedCode(id:string):Promise<any>;
   assertDirectReady(row:any,includeMerges?:boolean):Promise<void>;
   snapshot(id:string):Promise<{status:string}>;
-  changes(id:string):Promise<ChangesView>;
+  changes(id:string,options?:{shared?:boolean}):Promise<ChangesView>;
   withPromptAdmission<T>(id:string,action:(admission:{check:()=>void})=>Promise<T>):Promise<T>;
 }
 type Send=(sessionId:string,type:string,payload:unknown,durable?:boolean)=>Promise<void>;
@@ -159,7 +159,7 @@ export class Qa{
   async list(sessionId:string):Promise<QaView>{
     await this.host.verifiedCode(sessionId);
     const runs=await this.storage.call<RunRow[]>("qaRuns",{sessionId});
-    let revision:string|null=null;try{revision=(await this.host.changes(sessionId)).revision;}catch{}
+    let revision:string|null=null;try{revision=(await this.host.changes(sessionId,{shared:true})).revision;}catch{}
     const actions=await this.storage.call<QaActionView[]>("qaSessionActions",{sessionId});
     const artifacts=await this.storage.call<QaArtifactView[]>("qaArtifacts",{sessionId});
     return {runs:runs.map(run=>this.view(run,revision===run.revision&&["starting","running"].includes(run.status))),actions,artifacts:artifacts.map(({status:_,...rest}:any)=>rest)};

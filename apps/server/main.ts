@@ -54,11 +54,15 @@ const listeners=new Map<string,Set<(event:JournalEvent|{type:string;payload:unkn
 const streamClosers=new Set<()=>void>();
 const pickerShutdown=new AbortController();
 const isUUID=(value:string)=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+// Any event but streamed text may follow a workspace change; shared Git reads (PiHost.changes) never span one.
+let eventEpoch=0;
 async function emit(sessionId:string,type:string,payload:unknown,durable=false){
+  if(type!=="delta")eventEpoch++;
   const event=durable?await storage.event(sessionId,type,payload):{type,payload};
   for(const listener of listeners.get(sessionId)||[])listener(event);
 }
 const host=new PiHost(storage,dataDir,emit,controlPlanePorts);
+host.eventEpoch=()=>eventEpoch;
 await host.init();
 // Packaged runtime carries an optional pinned proxy binary under resources/; absent in dev, where provisioning reports not_installed.
 const localProxy=new CliproxyProcess(dataDir,{binarySource:fileURLToPath(new URL(`../../resources/cliproxyapi/${PINNED_BINARY_NAME}`,import.meta.url))});
@@ -262,7 +266,12 @@ app.post("/api/sessions",async(req,reply)=>{
     }catch(error){let unresolved=false;if(fresh){const saved=await storage.call<any>("commandSetupGet",{id});unresolved=["allocating","allocated","registered","opened","dispatching"].includes(saved?.setup?.phase);await storage.call("commandStatus",{id,status:unresolved?"unknown":"rejected"});}return reply.code(unresolved?409:400).send({id,status:unresolved?"unknown":"rejected",error:error instanceof Error?error.message:"Cannot create session"});}
   });}catch(error){return reply.code(400).send({id,status:"rejected",error:error instanceof Error?error.message:"Cannot admit session"});}
 });
-app.get<{Params:{id:string}}>("/api/sessions/:id",async(req,reply)=>{try{return await host.snapshot(req.params.id);}catch{return reply.code(404).send({error:"Session unavailable"});}});
+app.get<{Params:{id:string}}>("/api/sessions/:id",async(req,reply)=>{try{return await host.snapshot(req.params.id,{steps:"latest"});}catch{return reply.code(404).send({error:"Session unavailable"});}});
+// Work steps of an earlier turn, left out of the chat snapshot above to keep chat switching light.
+app.get<{Params:{id:string;messageId:string}}>("/api/sessions/:id/messages/:messageId/work",async(req,reply)=>{
+  let work;try{work=await host.workSteps(req.params.id,req.params.messageId);}catch{return reply.code(404).send({error:"Session unavailable"});}
+  return work?{steps:work.steps}:reply.code(404).send({error:"No work steps for this message"});
+});
 // One storage operation reads membership, node state and a consistent journal cursor.
 app.get<{Params:{id:string}}>("/api/sessions/:id/graph",async(req,reply)=>{
   try{return await storage.call("graphSnapshot",{scopeId:req.params.id});}catch{return reply.code(404).send({error:"Graph scope unavailable"});}
@@ -277,7 +286,7 @@ app.get<{Params:{id:string;nodeId:string}}>("/api/sessions/:id/graph/nodes/:node
 });
 // Read-only Git status of the session's selected folder and, when separate, its isolated workspace.
 app.get<{Params:{id:string}}>("/api/sessions/:id/repository",async(req,reply)=>{
-  let snapshot;try{snapshot=await host.snapshot(req.params.id);}catch{return reply.code(404).send({error:"Session unavailable"});}
+  let snapshot;try{snapshot=await host.state(req.params.id);}catch{return reply.code(404).send({error:"Session unavailable"});}
   const source=snapshot.policy?.workspace?.sourceCwd??snapshot.cwd;
   const [sourceStatus,workspaceStatus,git]=await Promise.all([folderStatus(source),snapshot.cwd!==source?folderStatus(snapshot.cwd):Promise.resolve(null),host.gitInfo(req.params.id)]);
   return {checkedAt:Date.now(),source:sourceStatus,workspace:workspaceStatus,git};
@@ -318,7 +327,7 @@ app.post<{Params:{id:string;approvalId:string}}>("/api/sessions/:id/writes/:appr
   try{return await host.reconcileDirectWrite(req.params.id,req.params.approvalId,{acknowledge:true,observedHash:body.observedHash,observedMode:body.observedMode as number|null,state:body.state});}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Direct write reconciliation unavailable"});}
 });
 app.get<{Params:{id:string}}>("/api/sessions/:id/changes",async(req,reply)=>{
-  try{return await host.changes(req.params.id);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Changes unavailable"});}
+  try{return await host.changes(req.params.id,{shared:true});}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Changes unavailable"});}
 });
 app.get<{Params:{id:string};Querystring:{revision?:string}}>("/api/sessions/:id/changes.patch",async(req,reply)=>{
   try{
@@ -569,7 +578,7 @@ app.post<{Params:{id:string;approvalId:string}}>("/api/sessions/:id/approvals/:a
 app.get<{Params:{id:string};Querystring:{after?:string}}>("/api/sessions/:id/events",async(req,reply)=>{
   const sessionId=req.params.id;
   if(appClosing)return reply.code(503).send({error:"Service is shutting down"});
-  try{await host.snapshot(sessionId);}catch{return reply.code(appClosing?503:404).send({error:appClosing?"Service is shutting down":"Session unavailable"});}
+  try{await host.state(sessionId);}catch{return reply.code(appClosing?503:404).send({error:appClosing?"Service is shutting down":"Session unavailable"});}
   if(appClosing)return reply.code(503).send({error:"Service is shutting down"});
   const after=Number(req.query.after||0);if(!Number.isSafeInteger(after)||after<0)return reply.code(400).send({error:"Invalid cursor"});
   reply.hijack();reply.raw.writeHead(200,{"Content-Type":"text/event-stream","Cache-Control":"no-cache","Connection":"keep-alive","X-Accel-Buffering":"no"});reply.raw.flushHeaders();

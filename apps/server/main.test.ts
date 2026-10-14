@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Storage } from "./storage.js";
-import { PiHost, visibleMessages } from "./pi-host.js";
+import { PiHost, cachedVisibleMessages, trimWorkSteps, visibleMessages } from "./pi-host.js";
 import { registerDemoProvider } from "./demo-provider.js";
 import { chromiumPath } from "./qa-browser.js";
 import { syntheticChromeBinary } from "./chrome-test-fixture.js";
@@ -188,6 +188,11 @@ test("authenticated Pi SDK session, approval, idempotency and restart",async()=>
     const delegationId=crypto.randomUUID();await req(`/sessions/${sid}/prompt`,"POST",{text:"delegate2: inspect A | inspect B"},delegationId);
     await waitFor(async()=>{const s=(await req(`/sessions/${sid}`)).data;return s.status==="settled"&&s.agents.length===3&&s.agents.every((a:any)=>a.status==="settled");});
     const beforeRestart=(await req(`/sessions/${sid}`)).data;
+    {const earlier=beforeRestart.messages.find((m:any)=>m.role==="user"&&m.text==="read:package.json"),latest=[...beforeRestart.messages].reverse().find((m:any)=>m.role==="user");
+    assert.deepEqual(earlier.work.steps,[],"Earlier turns leave their steps out of the chat snapshot");assert.ok(earlier.work.stepCount>0);assert.ok(latest.work.steps.length>0&&latest.work.stepCount===undefined,"The latest turn keeps its steps");
+    const steps=(await req(`/sessions/${sid}/messages/${earlier.id}/work`)).data.steps;assert.equal(steps.length,earlier.work.stepCount);
+    assert.ok(steps.some((st:any)=>st.kind==="tool"&&st.tool==="read"&&st.detail==="package.json"&&st.status==="done"),"Steps of an earlier turn load on demand");
+    assert.equal((await req(`/sessions/${sid}/messages/no-such-message/work`)).status,404);}
     const delegatedGraph=(await req(graphPath)).data;
     assert.equal(delegatedGraph.nodes.length,3);assert.equal(new Set(delegatedGraph.nodes.map((node:any)=>node.id)).size,3);
     const receipts=delegatedGraph.events.filter((event:any)=>event.payload.kind==="result"&&event.payload.outcome==="received");
@@ -469,6 +474,18 @@ PiHost.prototype.init=async function(){await original.call(this);this.runtime.re
   }finally{await stop(child);}
 });
 
+test("visible messages are rebuilt only when the history changes, and trimming keeps the latest turn's steps",()=>{
+  const user={role:"user",content:"go",timestamp:1_000},call={role:"assistant",content:[{type:"toolCall",id:"c1",name:"read",arguments:{path:"a.txt"}}],timestamp:1_010},result={role:"toolResult",toolCallId:"c1",isError:false,content:[],timestamp:1_020};
+  const entries:any[]=[{type:"message"},{type:"message"}],session:any={messages:[user,call],sessionManager:{fileEntries:entries,getEntries:()=>[]}};
+  const first=cachedVisibleMessages(session,"/tmp");assert.equal(cachedVisibleMessages(session,"/tmp"),first,"Unchanged history reuses the built view");
+  assert.equal((first[0].work!.steps[0] as any).status,"running");
+  session.messages.push(result);entries.push({type:"message"});
+  const second=cachedVisibleMessages(session,"/tmp");assert.notEqual(second,first);assert.equal((second[0].work!.steps[0] as any).status,"done","A new message rebuilds the view");
+  session.messages=[...session.messages];assert.notEqual(cachedVisibleMessages(session,"/tmp"),second,"A replaced history array (compaction) rebuilds the view");
+  const two=[{id:"0",role:"user",text:"a",work:{startedAt:1,endedAt:2,steps:[{kind:"note" as const,text:"x"}]}},{id:"1",role:"assistant",text:"b"},{id:"2",role:"user",text:"c",work:{startedAt:3,endedAt:4,steps:[{kind:"note" as const,text:"y"}]}}];
+  const trimmed=trimWorkSteps(two);assert.deepEqual(trimmed[0].work,{startedAt:1,endedAt:2,steps:[],stepCount:1});assert.equal(trimmed[2],two[2]);assert.equal(two[0].work!.steps.length,1,"Trimming never changes the cached view");
+});
+
 test("a stopped run reports the time up to when its last message was saved, not when it started streaming",()=>{
   const user={role:"user",content:"think hard",timestamp:1_000},stopped={role:"assistant",content:[{type:"thinking",thinking:"hmm"}],stopReason:"aborted",timestamp:1_050};
   const session={messages:[user,stopped],sessionManager:{getEntries:()=>[{type:"message",message:user,timestamp:new Date(1_000).toISOString()},{type:"message",message:stopped,timestamp:new Date(13_000).toISOString()}]}};
@@ -707,12 +724,12 @@ test("PiHost close drains an approval finalizer already removed from pending",as
   }finally{clearTimeout(pending.timer);release();try{await finalizing;}catch{}try{await closing;}catch{}await storage.close();}
 });
 
-test("shutdown rejects an SSE request whose session snapshot finishes late",async()=>{
+test("shutdown rejects an SSE request whose session lookup finishes late",async()=>{
   const port=await freePort(),origin=`http://127.0.0.1:${port}`,data=join(testRoot,"late-sse-shutdown");await mkdir(data,{recursive:true});
   const gate=join(data,"hold"),entered=join(data,"entered"),release=join(data,"release"),preload=join(data,"hold-snapshot.mjs");
   await writeFile(preload,`import {existsSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {pathToFileURL} from 'node:url';
 const {PiHost}=await import(pathToFileURL(join(process.env.SIGMA_ROOT,'apps/server/pi-host.ts')).href);
-PiHost.prototype.snapshot=async function(){if(existsSync(process.env.SIGMA_GATE)&&!existsSync(process.env.SIGMA_ENTERED)){writeFileSync(process.env.SIGMA_ENTERED,'held');while(!existsSync(process.env.SIGMA_RELEASE))await new Promise(resolve=>setTimeout(resolve,10));}return {};};
+PiHost.prototype.state=async function(){if(existsSync(process.env.SIGMA_GATE)&&!existsSync(process.env.SIGMA_ENTERED)){writeFileSync(process.env.SIGMA_ENTERED,'held');while(!existsSync(process.env.SIGMA_RELEASE))await new Promise(resolve=>setTimeout(resolve,10));}return {};};
 `);
   const child=spawn(process.execPath,["--import","tsx","--import",preload,"apps/server/main.ts"],{cwd:root,env:{PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,HOME:testRoot,SIGMA_APPROVAL_MODE:"ask",PI_OFFLINE:"1",PI_CODING_AGENT_DIR:join(data,"agent"),SIGMA_ROOT:root,SIGMA_DEMO:"1",SIGMA_PORT:String(port),SIGMA_DATA_DIR:data,SIGMA_GATE:gate,SIGMA_ENTERED:entered,SIGMA_RELEASE:release},stdio:["ignore","pipe","pipe"]});
   let output="";for(const stream of [child.stdout,child.stderr])stream?.on("data",chunk=>{output=(output+String(chunk)).slice(-2000);});

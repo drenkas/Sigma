@@ -87,9 +87,12 @@ export function Graph(p:{id:string;active:boolean;selected:string|null;waiting?:
   // Keep the whole tree in view while it grows, until the user pans or zooms.
   createEffect(()=>{width();layout().order.length;if(!moved)queueMicrotask(fit);});
   const scopeId=createMemo(()=>p.id),enabled=createMemo(()=>p.active);
+  // Graphs of recently shown chats stay in memory: reopening the tab or the chat continues from the saved cursor instead of reloading.
+  const saved=new Map<string,GraphSnapshot>();let shownScope:string|undefined;
+  createEffect(()=>{const g=graph(),id=untrack(scopeId);if(g&&id===shownScope){saved.delete(id);saved.set(id,g);while(saved.size>12)saved.delete(saved.keys().next().value!);}});
   createEffect(()=>{
     const id=scopeId(),active=enabled(),version=++generation;let closed=false,busy=false;
-    setGraph(null);setError("");setZoom(1);setOffset({x:0,y:0});moved=false;
+    if(id!==shownScope){shownScope=id;setGraph(saved.get(id)??null);setError("");setZoom(1);setOffset({x:0,y:0});moved=false;}
     async function refresh(){
       if(closed||busy||!active)return;busy=true;
       try{

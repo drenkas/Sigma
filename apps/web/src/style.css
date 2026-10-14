@@ -295,7 +295,7 @@ select.input option{background:var(--surface-2)}
 .placeholder{display:flex;align-items:center;gap:var(--s3);color:var(--text-2)}
 .placeholder.error{flex-direction:column;text-align:center;color:var(--err-text)}
 .placeholder.error span{color:var(--text-2);font-size:13px}
-.scroller{flex:1;min-height:0;overflow:auto;scroll-behavior:auto}
+.scroller{flex:1;min-height:0;overflow:auto;scroll-behavior:auto;overflow-anchor:none}
 .thread{max-width:780px;margin:0 auto;padding:var(--s6) var(--s6) var(--s4);display:flex;flex-direction:column;gap:var(--s6)}
 .older{align-self:center}
 .thread-empty{padding:var(--s8) 0 var(--s4);display:flex;flex-direction:column;gap:var(--s2)}
