@@ -1,9 +1,7 @@
-Package: @earendil-works/pi-coding-agent@0.87.1
+Package: @earendil-works/pi-codemode@1.2.0
 License: MIT per package.json; no license file shipped in the npm tarball
-Text source: LICENSE at root of github.com/earendil-works/pi at tag v0.87.1 (identical to main; packages/* have no own LICENSE)
-Date: 2026-10-05
-Provenance details: .scratch/licenses-2026-10-05/REPORT.md
-Note: Root LICENSE names Mario Zechner as holder; chord package.json author is "Earendil Works"
+Text source: LICENSE at root of github.com/earendil-works/pi at tag v1.2.0 (packages/* have no own LICENSE)
+Date: 2026-10-14
 ----------------------------------------------------------------
 
 MIT License
