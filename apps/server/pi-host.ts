@@ -82,7 +82,9 @@ Rules for every delegation:
 type DelegationContext = {root:RecordRow;depth:number;ancestors:string[];canDelegate:boolean};
 type Active = { session:AgentSession; row:RecordRow; unsubscribe:()=>void; metadata?:RunMetadata };
 type ApprovalMode="full"|"ask";
-type Pending = { sessionId:string; agentId:string; ready:Promise<void>; resolve:(allow:boolean)=>void; timer:ReturnType<typeof setTimeout>; finalizing?:Promise<void> };
+// Tools a user may allow for a whole chat. Commits stay one decision each: every commit shows its own message and diff.
+const GRANTABLE_TOOLS=new Set(["read","ls","edit","write","bash","browser_action","qa_action"]);
+type Pending = { sessionId:string; agentId:string; tool:string; ready:Promise<void>; resolve:(allow:boolean)=>void; timer:ReturnType<typeof setTimeout>; finalizing?:Promise<void> };
 type ChildRun = { row:RecordRow; cancelled:boolean; stop?:Promise<void>; done:Promise<void>;registered?:boolean;solo?:boolean;working?:Promise<void> };
 type AutoMerger=(rootId:string,workerId:string)=>Promise<{status:"applied"|"empty"|"pending";reason?:string}>;
 type PromptAdmission = { unresolvedOwner?:boolean;cleanup?:boolean; id:string;cancelled:boolean;done:Promise<void>;check:()=>void };
@@ -162,6 +164,8 @@ export class PiHost {
   private loading = new Map<string,Promise<Active>>();
   private pending = new Map<string,Pending>();
   private mode:ApprovalMode="full";
+  // Tools the user allowed for the rest of a chat (keyed by root session); held in memory, so a restart asks again.
+  private grants=new Map<string,Set<string>>();
   private autoMerger?:AutoMerger;
   setAutoMerger(merger:AutoMerger|undefined){this.autoMerger=merger;}
   private modeSave:Promise<void>=Promise.resolve();
@@ -560,7 +564,7 @@ export class PiHost {
     const id=randomUUID(),channel=row.rootId||row.id;let pending!:Pending;
     const allowedPromise=new Promise<boolean>(resolve=>{
       const timer=setTimeout(()=>{void this.finishApproval(id,pending,"expired").catch(()=>{});},300_000);
-      pending={sessionId:channel,agentId:row.id,ready:Promise.resolve(),resolve,timer};this.pending.set(id,pending);
+      pending={sessionId:channel,agentId:row.id,tool,ready:Promise.resolve(),resolve,timer};this.pending.set(id,pending);
     });
     pending.ready=(async()=>{
       await this.storage.call("approval",{id,sessionId:channel,agentId:row.id,tool,preview,change,commandId,git});
@@ -568,7 +572,7 @@ export class PiHost {
     })();
     try{await pending.ready;}
     catch{const p=this.pending.get(id);if(p){clearTimeout(p.timer);this.pending.delete(id);p.resolve(false);}return null;}
-    if(this.mode==="full"&&!this.isStopping(row)){const p=this.pending.get(id);if(p)try{await this.finishApproval(id,p,"approved");}catch{return null;}}
+    if((this.mode==="full"||this.grants.get(channel)?.has(tool))&&!this.isStopping(row)){const p=this.pending.get(id);if(p)try{await this.finishApproval(id,p,"approved");}catch{return null;}}
     return await allowedPromise&&!this.isStopping(row)?id:null;
   }
   private async writeOutcome(row:RecordRow,id:string,outcome:WriteOutcome){
@@ -1073,7 +1077,7 @@ export class PiHost {
     const {session,row}=await this.get(id);const approvals=await this.storage.call<ApprovalView[]>("approvals",{sessionId:id});
     const agents=(await this.storage.call<Array<RecordRow&{revisionReviewer:boolean}>>("agents",{rootId:id})).map((item):AgentView=>({id:item.id,parentId:item.parentId,role:item.role,status:item.status,model:item.model,cwd:item.cwd,revisionReviewer:item.revisionReviewer}));
     const visible=cachedVisibleMessages(session,row.cwd),messages=options.steps==="latest"?trimWorkSteps(visible):visible,[recoveryInputs,recoveryActions]=await Promise.all([this.storage.call<RecoveryInput[]>("recoveryInputs",{sessionId:id}),this.storage.call<RecoveryAction[]>("recoveryActions",{sessionId:id})]);
-    return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status,cursor,agents,approvals,recoveryInputs,recoveryActions,messages,archivedAt:await this.storage.call<number|null>("ownerArchivedAt",{id})};
+    return {id,cwd:row.cwd,model:row.model,policy:row.policy,status:row.status,cursor,agents,approvals,grants:this.grantedTools(id),recoveryInputs,recoveryActions,messages,archivedAt:await this.storage.call<number|null>("ownerArchivedAt",{id})};
   }
   /** The open session's saved state without building its messages: for routes that only check existence, folder, policy or run status. */
   async state(id:string):Promise<Pick<SessionView,"id"|"cwd"|"model"|"policy"|"status">>{
@@ -1309,12 +1313,20 @@ export class PiHost {
       if(outcomes.some(outcome=>outcome.status==="rejected"))throw new Error("Some task sessions could not be stopped; inspect each repository");
     }finally{for(const release of releases)release();this.stoppingTasks.delete(task.id);}
   }
-  async decide(id:string,approvalId:string,allow:boolean){
+  /** `scope:"chat"` also allows this tool without asking for the rest of the chat (every agent under the same root) and releases its other waiting calls. */
+  async decide(id:string,approvalId:string,allow:boolean,scope:"once"|"chat"="once"){
     const p=this.pending.get(approvalId);if(!p||p.sessionId!==id)throw new Error("Approval is no longer pending");
+    if(allow&&scope==="chat"&&!GRANTABLE_TOOLS.has(p.tool))throw new Error("This tool is approved one call at a time");
     const row=this.active.get(p.agentId)?.row??this.children.get(p.agentId)?.row;
     if(this.stopping.has(id)||row&&this.isStopping(row))throw new Error("Agent stopped");
+    if(allow&&scope==="chat"){const set=this.grants.get(id)??new Set<string>();set.add(p.tool);this.grants.set(id,set);await this.send(id,"approval_grants",{tools:[...set]},false);}
     await this.finishApproval(approvalId,p,allow?"approved":"denied");
+    if(allow&&scope==="chat")await Promise.allSettled([...this.pending].filter(([,other])=>other.sessionId===id&&other.tool===p.tool).map(([otherId,other])=>this.finishApproval(otherId,other,"approved")));
   }
+  /** Tools allowed for the rest of this chat. */
+  grantedTools(id:string):string[]{return [...this.grants.get(id)??[]];}
+  /** Ask again for every call in this chat. */
+  async revokeGrants(id:string){this.grants.delete(id);await this.send(id,"approval_grants",{tools:[]},false);}
   beginShutdown(){this.closing=true;killAllShells();this.providerAuth?.beginShutdown();this.nativeProviders?.beginShutdown();}
   close(){
     this.beginShutdown();

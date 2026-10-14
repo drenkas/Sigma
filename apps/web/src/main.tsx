@@ -40,6 +40,10 @@ const RUN:Record<string,{label:string;hint:string}>={
   interrupted:{label:"Interrupted",hint:"Stopped by you or by a service restart."},
   error:{label:"Error",hint:"The Pi run ended with an error."},
 };
+// What each gated tool does, for the permission panel; tools a user may allow for a whole chat (commits stay one decision each, as on the server).
+const TOOL_LABEL:Record<string,string>={read:"reading files",ls:"listing folders",edit:"editing files",write:"writing files",bash:"shell commands",browser_action:"browser actions",qa_action:"QA actions"};
+const toolLabel=(tool:string)=>TOOL_LABEL[tool]??tool;
+const GRANTABLE=new Set(Object.keys(TOOL_LABEL));
 const APPROVAL:Record<string,string>={pending:"Waiting",approved:"Allowed",denied:"Denied",expired:"Expired"};
 const isDemo=(model:string)=>model.startsWith("sigma-demo/")||model.startsWith("pi-orch-demo/");
 const MODE_LABEL:Record<string,string>={read:"Read only",code:"Editing",parallel:"Editing",multi:"Multi-repository"};
@@ -206,6 +210,9 @@ function App(){
   const rootWs=()=>workspaceKind(current())==="direct"?"the selected folder":"the root workspace";
   async function refreshAccess(){try{const r=await api<{mode:"full"|"ask"}>("/v2/access");setAccess(r.mode==="ask"?"ask":"full");}catch{/* keep last known mode */}}
   const pending=createMemo(()=>current()?.approvals.filter(a=>a.status==="pending")||[]);
+  // The permission panel shows the oldest waiting request; the rest follow one by one.
+  const permit=createMemo(()=>{const list=pending();return list[list.length-1];});
+  const [permitText,setPermitText]=createSignal("");
   const directNeeds=createMemo(()=>workspaceKind(current())==="direct"?current()?.approvals.filter(a=>a.needsReconciliation).length??0:0);
   const agents=createMemo(()=>current()?.agents||[]);
   const root=createMemo(()=>agents().find(a=>!a.parentId));
@@ -380,6 +387,7 @@ function App(){
       }
       if(event.type==="approval")setCurrent(x=>x?{...x,approvals:x.approvals.some(a=>a.id===event.payload.id)?x.approvals:[event.payload,...x.approvals]}:x);
       if(event.type==="approval_decision"){setCurrent(x=>x?{...x,approvals:x.approvals.map(a=>a.id===event.payload.id?{...a,status:event.payload.status}:a)}:x);setDeciding(x=>x.filter(d=>d!==event.payload.id));handoffFocus();}
+      if(event.type==="approval_grants")setCurrent(x=>x?{...x,grants:event.payload.tools}:x);
       if(event.type==="write_outcome"){setCurrent(x=>x?{...x,approvals:x.approvals.map(a=>a.id===event.payload.id?{...a,outcome:event.payload.outcome}:a)}:x);setEvidenceVersion(x=>x+1);}
       if(event.type==="check_changed"||event.type==="review_changed"||event.type==="source_apply_changed"||event.type==="worker_merge_changed"||event.type==="repository_changed"||event.type==="qa_changed"||event.type==="browser_use_changed"||event.type==="browser_mode_command")setEvidenceVersion(x=>x+1);
       if(event.type==="agy_activity"){const record=event.payload as AgyRecord;setAgyActivity(x=>{const at=x.findIndex(item=>item.agentId===record.agentId&&item.step===record.step);return at>=0?x.map((item,index)=>index===at?record:item):[...x.slice(-299),record];});}
@@ -501,10 +509,17 @@ function App(){
       if(result.status==="queued")setNotice({kind:"info",text:`Message queued for ${cap(agent.role)} ${short(agent.id)}; delivery is not yet confirmed.`});
     }catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setChildBusy(false);}
   }
-  async function decide(approval:ApprovalView,allow:boolean){const s=current();if(!s||taskUnresolved())return;setDeciding(x=>[...x,approval.id]);try{await api(`/sessions/${s.id}/approvals/${approval.id}`,"POST",{allow});handoffFocus();}catch(e){setDeciding(x=>x.filter(d=>d!==approval.id));fail(e);}}
+  async function decide(approval:ApprovalView,allow:boolean,scope:"once"|"chat"="once"){const s=current();if(!s||taskUnresolved())return false;setDeciding(x=>[...x,approval.id]);try{await api(`/sessions/${s.id}/approvals/${approval.id}`,"POST",{allow,scope});handoffFocus();return true;}catch(e){setDeciding(x=>x.filter(d=>d!==approval.id));fail(e);return false;}}
+  // Deny, then steer the agent that asked with what to do instead; it reads the note after the refused call.
+  async function denyWithNote(approval:ApprovalView,text:string){
+    const s=current(),note=text.trim();if(!s||!note||!await decide(approval,false))return;setPermitText("");
+    const child=approval.agentId&&approval.agentId!==s.id,path=child?`/sessions/${s.id}/agents/${approval.agentId}/prompt`:`/sessions/${s.id}/prompt`;
+    try{const result=await api<{status:string}>(path,"POST",{text:note,behavior:"steer"},crypto.randomUUID());if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Your note's delivery is uncertain. Check the conversation before sending it again.");if(!child)await resync(s.id);}catch(e){fail(e);}
+  }
+  async function revokeGrants(){const s=current();if(!s)return;try{await api(`/sessions/${s.id}/grants`,"DELETE");setCurrent(x=>x?.id===s.id?{...x,grants:[]}:x);}catch(e){fail(e);}}
   function copyRecovery(input:RecoveryInput){const s=current();if(!s)return;sessionStorage.removeItem(`pi-prompt-${s.id}`);setPrompt(input.text);setNotice({kind:"warning",text:"Copied to the composer, not sent. Check Pi history first; the earlier outcome is uncertain. Send it yourself as a new command if it is still needed."});if(overlayDetails())closeDetails(false);queueMicrotask(()=>{resize();composer?.focus();});}
   // A decided approval card unmounts; keep keyboard users on the next request or the composer.
-  function handoffFocus(){setTimeout(()=>{const a=document.activeElement;if(a&&a!==document.body&&a.isConnected)return;(overlayDetails()&&detailsOpen()?treeSection||detailsTitle:document.querySelector<HTMLElement>(".approval .btn.primary")||composer)?.focus();},60);}
+  function handoffFocus(){setTimeout(()=>{const a=document.activeElement;if(a&&a!==document.body&&a.isConnected)return;(overlayDetails()&&detailsOpen()?treeSection||detailsTitle:document.querySelector<HTMLElement>(".permit .permit-option")||composer)?.focus();},60);}
   const COMMIT_PROMPT="Commit the current changes now: inspect the working-tree diff, write a concise commit message (imperative subject up to 72 characters, optional short body) and call git_commit directly with that message. Do not ask me to confirm the message in chat; the git_commit tool shows its own approval.";
   async function requestCommit(){if(running()||busy())return;const draft=prompt();setPrompt(COMMIT_PROMPT);await send();if(draft.trim()&&!prompt())setPrompt(draft);}
   function insertExample(text:string){setPrompt(text);queueMicrotask(()=>{resize();composer?.focus();});}
@@ -587,7 +602,7 @@ function App(){
     detailsReturn=document.activeElement as HTMLElement|null;setDetailsOpen(true);
     queueMicrotask(()=>{const t=target();if(t){t.scrollIntoView({block:"start"});t.focus();}else detailsPanel?.querySelector<HTMLElement>(".drawer-close")?.focus();});
   }
-  function goToDecision(){if(detailsOpen())closeDetails(false);queueMicrotask(()=>document.querySelector<HTMLElement>(".approval .btn.primary")?.focus());}
+  function goToDecision(){if(detailsOpen())closeDetails(false);queueMicrotask(()=>document.querySelector<HTMLElement>(".permit .permit-option")?.focus());}
   function closeDetails(restore=true){setDetailsOpen(false);if(restore)detailsReturn?.focus();}
   function openNav(){navReturn=document.activeElement as HTMLElement|null;setNavOpen(true);queueMicrotask(()=>navPanel?.querySelector<HTMLElement>(".drawer-close")?.focus());}
   function closeNav(){setNavOpen(false);navReturn?.focus();}
@@ -865,6 +880,7 @@ function App(){
           <Show when={current()!.policy?.workspace&&!taskUnresolved()&&"verification" in current()!.policy!.effective.profile}><Qa id={current()!.id} revision={evidenceVersion().toString()} askMode={askMode()} active={detailTab()==="changes"&&panelShown()}/></Show>
           <section class="panel" tabindex="-1" aria-labelledby="h-approvals">
             <h3 id="h-approvals" class="panel-title">Approvals <span class="count">{current()!.approvals.length}</span></h3>
+            <Show when={current()!.grants?.length}><p class="hint grant-line">Allowed for this chat without asking: {current()!.grants!.map(toolLabel).join(", ")}. <button class="link-btn" onClick={()=>void revokeGrants()}>Ask again</button></p></Show>
             <Show when={current()!.approvals.length} fallback={<p class="hint">No tool requests in this session yet. Each file operation waits for an explicit decision.</p>}>
               <ul class="log"><For each={current()!.approvals.slice(0,20)}>{a=><li>
                 <span class={`badge ap-${a.status}`}><span class="glyph" aria-hidden="true"/>{APPROVAL[a.status]||a.status}</span>
@@ -1049,24 +1065,33 @@ function App(){
 
       <Show when={!graphNode()||graphNode()!.id===current()?.id}><div class="dock">
         <Show when={mergePending()}><section class="approvals" aria-label="Worker merges awaiting a decision"><div class="dock-title"><span class="badge ap-pending"><span class="glyph" aria-hidden="true"/>{mergePending()} waiting</span>Worker merge {mergePending()===1?"needs":"merges need"} your decision</div><button class="btn ghost sm" onClick={()=>openDetails("merges")}>Review merge</button></section></Show>
-        <Show when={pending().length}>
-          <section class="approvals" aria-labelledby="h-pending" role="region">
-            <h2 id="h-pending" class="dock-title"><span class="badge ap-pending"><span class="glyph" aria-hidden="true"/>{pending().length} waiting</span>{pending().length===1?"Tool request needs":"Tool requests need"} your decision</h2>
+        <Show when={permit()} keyed>{a=>{
+          const locked=()=>deciding().includes(a.id)||offline()||taskUnresolved();
+          const options=()=>[
+            {label:a.tool==="git_commit"?"Commit":a.change?"Apply this change":"Allow once",desc:a.tool==="git_commit"?"Creates this commit with the message and diff shown":"Only this call; Sigma asks again next time",run:()=>void decide(a,true)},
+            ...(GRANTABLE.has(a.tool)?[{label:`Allow ${toolLabel(a.tool)} for this chat`,desc:`No more questions about ${toolLabel(a.tool)} from any agent in this chat; undo it with Ask again under Changes → Approvals`,run:()=>void decide(a,true,"chat")}]:[]),
+            {label:"Deny",desc:"The agent gets a refusal and carries on without it",deny:true,run:()=>void decide(a,false)},
+          ];
+          const keys=(e:KeyboardEvent)=>{if(e.target instanceof HTMLInputElement||e.metaKey||e.ctrlKey||e.altKey||locked())return;const o=options()[Number(e.key)-1];if(o){e.preventDefault();o.run();}};
+          return <section class="permit" aria-labelledby="h-pending" role="region" onKeyDown={keys}>
+            <div class="permit-head">
+              <h2 id="h-pending" class="permit-title"><strong>{roleOf(a.agentId)}</strong> asks for permission: <code>{a.tool}</code></h2>
+              <Show when={pending().length>1}><span class="badge ap-pending"><span class="glyph" aria-hidden="true"/>1 of {pending().length}</span></Show>
+            </div>
             <Show when={offline()}><p class="small dock-note">Decisions are paused until the connection is back. If the service restarted, these requests expire and are not executed.</p></Show>
-            <ul class="approval-list"><For each={pending()}>{a=><li class="approval">
-              <div class="approval-text">
-                <div><strong>{roleOf(a.agentId)}</strong> wants to run <code>{a.tool}</code></div>
-                <Show when={a.tool==="bash"} fallback={<div class="mono approval-path" title={a.preview}>{a.preview.replace(/^\S+\s/,"")}</div>}><pre class="change-diff" tabindex="0" aria-label="Command to run">{a.preview.replace(/^\S+\s/,"")}</pre></Show><Show when={a.git}><pre class="recovery-text">{a.git!.message}</pre><p class="mono small">Parent {a.git!.parent} · Tree {a.git!.tree}</p><pre class="change-diff" tabindex="0">{a.git!.diff}</pre></Show>
-                <div class="muted small">{a.tool==="bash"?"Runs a shell command on this computer in the agent's folder; Sigma's credential and data folders are blocked":a.tool==="git_commit"?"Creates a Git commit in the selected folder":a.tool==="browser_action"?"Controls the selected tab in the active browser mode; screenshots may be saved in Pi and Sigma history":a.change?workspaceKind(current())==="direct"?"Write to selected folder":"Write to isolated workspace":"Read-only"} · applies to this call only · requested {clock(a.createdAt)}</div>
-                <Show when={a.change}><pre class="change-diff" tabindex="0" aria-label={`Proposed change to ${a.change!.path}`}>{a.change!.diff}</pre></Show>
-              </div>
-              <div class="approval-actions">
-                <button class="btn danger-ghost sm" disabled={deciding().includes(a.id)||offline()||taskUnresolved()} onClick={()=>decide(a,false)} aria-label={`Deny ${a.preview}`}>Deny</button>
-                <button class="btn primary sm" disabled={deciding().includes(a.id)||offline()||taskUnresolved()} onClick={()=>decide(a,true)} aria-label={`Allow once: ${a.preview}`}>{a.tool==="git_commit"?"Commit":a.change?"Apply this change":"Allow once"}</button>
-              </div>
-            </li>}</For></ul>
-          </section>
-        </Show>
+            <div class="permit-body">
+              <Show when={a.tool==="bash"} fallback={<div class="mono approval-path" title={a.preview}>{a.preview.replace(/^\S+\s/,"")}</div>}><pre class="change-diff" tabindex="0" aria-label="Command to run">{a.preview.replace(/^\S+\s/,"")}</pre></Show><Show when={a.git}><pre class="recovery-text">{a.git!.message}</pre><p class="mono small">Parent {a.git!.parent} · Tree {a.git!.tree}</p><pre class="change-diff" tabindex="0">{a.git!.diff}</pre></Show>
+              <Show when={a.change}><pre class="change-diff" tabindex="0" aria-label={`Proposed change to ${a.change!.path}`}>{a.change!.diff}</pre></Show>
+              <div class="muted small">{a.tool==="bash"?"Runs a shell command on this computer in the agent's folder; Sigma's credential and data folders are blocked":a.tool==="git_commit"?"Creates a Git commit in the selected folder":a.tool==="browser_action"?"Controls the selected tab in the active browser mode; screenshots may be saved in Pi and Sigma history":a.change?workspaceKind(current())==="direct"?"Write to selected folder":"Write to isolated workspace":"Read-only"} · requested {clock(a.createdAt)}</div>
+            </div>
+            <ol class="permit-options"><For each={options()}>{(o,i)=><li><button type="button" class="permit-option" classList={{deny:!!o.deny}} disabled={locked()} onClick={o.run} aria-label={`${o.label}: ${a.preview}`}><span class="permit-key" aria-hidden="true">{i()+1}</span><span class="permit-text"><span class="permit-label">{o.label}</span><span class="permit-desc">{o.desc}</span></span></button></li>}</For></ol>
+            <form class="permit-custom" onSubmit={e=>{e.preventDefault();void denyWithNote(a,permitText());}}>
+              <label for="permit-own" class="sr-only">Deny and tell the agent what to do instead</label>
+              <input id="permit-own" class="input" value={permitText()} onInput={e=>setPermitText(e.currentTarget.value)} disabled={taskUnresolved()} placeholder="Or deny and tell the agent what to do instead…" autocomplete="off"/>
+              <button type="submit" class="btn primary sm" disabled={!permitText().trim()||locked()}>Send</button>
+            </form>
+          </section>;
+        }}</Show>
         <Show when={current()!.recoveryInputs.length||current()!.recoveryActions.length}>
           <div class="recovery-strip" role="status"><span class="badge st-unknown"><span class="glyph" aria-hidden="true"/>Unknown</span><span>{current()!.recoveryInputs.length+current()!.recoveryActions.length} action{current()!.recoveryInputs.length+current()!.recoveryActions.length===1?" has an":"s have an"} unknown outcome. Nothing was replayed.</span><button class="link-btn" onClick={()=>openDetails("recovery")}>Review</button></div>
         </Show>

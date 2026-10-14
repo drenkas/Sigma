@@ -55,3 +55,32 @@ test("access mode persists privately and survives reload",async()=>{
   await writeFile(join(testRoot,"persist","agent-access.json"),"{bad");
   const broken=await open("persist");try{assert.equal(broken.host.approvalMode,"full");}finally{await broken.close();}
 });
+
+test("allowing a tool for the chat skips later prompts for it and releases its waiting calls until revoked",async()=>{
+  const f=await open("chat-grant","ask");
+  try{
+    const waiting=async(n:number)=>{for(let i=0;i<100;i++){const p=(await f.host.snapshot(f.sid)).approvals.filter(a=>a.status==="pending");if(p.length>=n)return p;await new Promise(r=>setTimeout(r,50));}throw new Error("approvals did not arrive");};
+    const first=f.ask("read one"),second=f.ask("read two"),other=(f.host as any).requestApproval(f.row,"bash","bash ls") as Promise<string|null>;
+    const pending=await waiting(3);
+    await f.host.decide(f.sid,pending.find(a=>a.preview==="read one")!.id,true,"chat");
+    assert.ok(await first);assert.ok(await second,"the other waiting read is released");
+    assert.deepEqual(f.host.grantedTools(f.sid),["read"]);assert.deepEqual((await f.host.snapshot(f.sid)).grants,["read"]);
+    const later=await f.ask("read three");assert.ok(later);assert.equal(await status(f,later!),"approved");
+    assert.equal(await status(f,pending.find(a=>a.tool==="bash")!.id),"pending","other tools still ask");
+    await f.host.decide(f.sid,pending.find(a=>a.tool==="bash")!.id,false);assert.equal(await other,null);
+    await f.host.revokeGrants(f.sid);assert.deepEqual(f.host.grantedTools(f.sid),[]);
+    const again=f.ask("read four");const [fresh]=await waiting(1);assert.equal(fresh.preview,"read four");
+    await f.host.decide(f.sid,fresh.id,false);assert.equal(await again,null);
+  }finally{await f.close();}
+});
+
+test("commits cannot be allowed for the whole chat",async()=>{
+  const f=await open("chat-grant-commit","ask");
+  try{
+    const commit=(f.host as any).requestApproval(f.row,"git_commit","git_commit x") as Promise<string|null>;
+    let pending:any[]=[];for(let i=0;i<100&&!pending.length;i++){pending=(await f.host.snapshot(f.sid)).approvals.filter(a=>a.status==="pending");if(!pending.length)await new Promise(r=>setTimeout(r,50));}
+    await assert.rejects(f.host.decide(f.sid,pending[0].id,true,"chat"),/one call at a time/);
+    assert.deepEqual(f.host.grantedTools(f.sid),[]);
+    await f.host.decide(f.sid,pending[0].id,false);assert.equal(await commit,null);
+  }finally{await f.close();}
+});

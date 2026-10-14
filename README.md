@@ -166,7 +166,7 @@ The same for both options.
 2. Click **New session**.
 3. Choose a directory (folder) and, if needed, **Separate Git worktree**.
 4. Describe the goal in the box at the bottom, optionally choosing the model and reasoning in its bar, and press Enter (or the send button): the session is created in editing mode (the agent can edit files and delegate to child agents) and the first prompt is sent.
-5. Keep chatting. With Full access (the default) tools run without asking and each action is recorded. With Agent access set to ask, every tool operation shows a card: **Apply this change** / **Deny** for file edits, **Commit** / **Deny** for `git_commit`, and **Allow once** / **Deny** for other tools.
+5. Keep chatting. With Full access (the default) tools run without asking and each action is recorded. With Agent access set to ask, every tool operation opens a permission panel above the message box, in the same style as the agent's questions: numbered choices **Allow once** (**Apply this change** for file edits, **Commit** for `git_commit`), **Allow … for this chat** (every agent in the chat then runs that tool without asking; not offered for `git_commit`; undo it with **Ask again** under Changes → Approvals, and a restart asks again) and **Deny**, plus a field to deny and tell the agent what to do instead. Keys 1–3 pick a choice; several waiting requests are shown one at a time.
 6. **Stop** interrupts the response.
 7. Sessions remain in **Sessions** after a restart.
 

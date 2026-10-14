@@ -572,8 +572,13 @@ app.post<{Params:{id:string;agentId:string}}>("/api/sessions/:id/agents/:agentId
   }catch{if(fresh)await storage.call("commandStatus",{id:commandId,status:"unknown"});return reply.code(409).send({error:"Child stop was not confirmed; inspect its state before retrying"});}
 });
 app.post<{Params:{id:string;approvalId:string}}>("/api/sessions/:id/approvals/:approvalId",async(req,reply)=>{
-  const body=req.body as {allow?:unknown};if(typeof body?.allow!=="boolean")return reply.code(400).send({error:"Decision required"});
-  try{await host.decide(req.params.id,req.params.approvalId,body.allow);return {recorded:true};}catch{return reply.code(409).send({error:"Approval unavailable"});}
+  const body=req.body as {allow?:unknown;scope?:unknown};if(typeof body?.allow!=="boolean")return reply.code(400).send({error:"Decision required"});
+  if(body.scope!==undefined&&body.scope!=="once"&&body.scope!=="chat")return reply.code(400).send({error:"Unknown approval scope"});
+  try{await host.decide(req.params.id,req.params.approvalId,body.allow,body.scope as "once"|"chat"|undefined);return {recorded:true};}catch{return reply.code(409).send({error:"Approval unavailable"});}
+});
+app.delete<{Params:{id:string}}>("/api/sessions/:id/grants",async(req,reply)=>{
+  try{await host.state(req.params.id);}catch{return reply.code(404).send({error:"Session unavailable"});}
+  await host.revokeGrants(req.params.id);return {tools:[]};
 });
 app.get<{Params:{id:string};Querystring:{after?:string}}>("/api/sessions/:id/events",async(req,reply)=>{
   const sessionId=req.params.id;

@@ -107,7 +107,7 @@ export interface RecoveryAction { id:string; kind:"delegate"|"edit"|"write"; sta
 export type WorkStep={kind:"note";text:string}|{kind:"thinking";text:string}|{kind:"tool";tool:string;detail?:string;status:"done"|"error"|"running"};
 /** `stepCount` is set when `steps` were left out of a chat snapshot to keep it small; read them from the message's work endpoint. */
 export interface WorkView {startedAt:number;endedAt:number;steps:WorkStep[];stepCount?:number}
-export interface SessionView { archivedAt?:number|null; id: string; cwd: string; model: string; policy: SessionPolicy | null; status: RunStatus; cursor: number; agents: AgentView[]; approvals: ApprovalView[]; recoveryInputs: RecoveryInput[]; recoveryActions: RecoveryAction[]; messages: Array<{ role: string; text: string; id: string; at?: number; images?: number; interim?: true; work?: WorkView }>; }
+export interface SessionView { archivedAt?:number|null; id: string; cwd: string; model: string; policy: SessionPolicy | null; status: RunStatus; cursor: number; agents: AgentView[]; approvals: ApprovalView[]; grants?: string[]; recoveryInputs: RecoveryInput[]; recoveryActions: RecoveryAction[]; messages: Array<{ role: string; text: string; id: string; at?: number; images?: number; interim?: true; work?: WorkView }>; }
 export interface JournalEvent { seq: number; sessionId: string; type: string; payload: unknown; at: number; }
 
 export interface ProjectView { id:string; name:string; folders:string[]; archivedAt?:number|null; }

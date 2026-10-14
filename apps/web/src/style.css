@@ -360,11 +360,25 @@ select.input option{background:var(--surface-2)}
 .approvals{border:1px solid var(--warn-border);background:var(--warn-bg);border-radius:var(--r-xl);padding:var(--s3);display:flex;flex-direction:column;gap:var(--s2)}
 .dock-title{display:flex;align-items:center;gap:var(--s2);font-size:13px;font-weight:600;color:var(--warn-text)}
 .dock-note{color:var(--warn-text)}
-.approval-list{display:flex;flex-direction:column;gap:var(--s2);max-height:38vh;overflow:auto}
-.approval{display:flex;align-items:center;gap:var(--s3);padding:var(--s3);border-radius:var(--r-lg);background:var(--surface-2);border:1px solid var(--border)}
-.approval-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;font-size:13px}
 .approval-path{color:var(--text);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.approval-actions{display:flex;gap:var(--s2);flex:none}
+/* permission panel: a waiting tool call as a question with numbered choices, above the composer */
+.permit{border:1px solid var(--border-strong);background:var(--surface);border-radius:var(--r-xl);padding:var(--s3);display:flex;flex-direction:column;gap:var(--s2)}
+.permit-head{display:flex;align-items:flex-start;gap:var(--s2)}
+.permit-title{flex:1;min-width:0;font-size:14px;font-weight:600;line-height:1.45;color:var(--text);overflow-wrap:anywhere;padding-top:3px}
+.permit-title strong{font-weight:600}
+.permit-body{display:flex;flex-direction:column;gap:var(--s1);max-height:30vh;overflow:auto;font-size:13px}
+.permit-options{display:flex;flex-direction:column;gap:var(--s1);list-style:none;margin:0;padding:0}
+.permit-option{display:flex;align-items:flex-start;gap:var(--s3);width:100%;padding:var(--s2) var(--s3);border-radius:var(--r-lg);border:1px solid var(--border);background:var(--surface-2);color:var(--text);text-align:left;font-size:13px;transition:background-color .12s,border-color .12s}
+.permit-option:hover:not(:disabled){background:var(--hover);border-color:var(--border-hover)}
+.permit-option:disabled{opacity:.6}
+.permit-option.deny .permit-label{color:var(--danger-text)}
+.permit-key{display:inline-grid;place-items:center;flex:none;width:20px;height:20px;border-radius:999px;background:var(--surface-3);color:var(--text-2);font-size:11px;font-weight:600}
+.permit-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.permit-label{font-weight:550;overflow-wrap:anywhere}
+.permit-desc{color:var(--text-2);font-size:12px;overflow-wrap:anywhere}
+.permit-custom{display:flex;gap:var(--s2);align-items:center}
+.permit-custom .input{flex:1;min-width:0}
+.grant-line{margin-bottom:var(--s2)}
 .recovery-strip{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s3);padding:var(--s2) var(--s3);border:1px solid var(--unk-border);background:var(--unk-bg);border-radius:var(--r-lg);font-size:13px;color:var(--unk-text)}
 .composer{position:relative;border:1px solid var(--border-strong);background:var(--surface-2);border-radius:var(--r-xl);box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
 .composer:focus-within{border-color:var(--border-hover)}
@@ -530,8 +544,6 @@ select.input option{background:var(--surface-2)}
 @media (max-width:560px){
   .hide-xs{display:none}
   .head-cwd,.head-model{display:none}
-  .approval{flex-direction:column;align-items:stretch}
-  .approval-actions .btn{flex:1;height:36px}
   .composer-hint{display:none}
   .msg.user{max-width:100%}
   .msg.assistant .msg-body{padding-left:0}
