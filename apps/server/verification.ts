@@ -52,12 +52,12 @@ export class Verification {
   }
   beginClose(){if(this.closing)return;this.closing=true;for(const run of this.active.values()){run.cancelled=true;run.child?.stdin?.end();}for(const review of this.reviewers.values())review.controller.abort();}
 
-  private async code(id:string){
+  private async code(id:string,shared=false){
     const row=await this.host.verifiedCode(id);
     await this.host.assertDirectReady(row,true);
     const snapshot=await this.host.snapshot(id);
     if(snapshot.status==="running"||await this.storage.call<boolean>("unresolvedWrite",{sessionId:id}))throw new Error("Wait for the current Code write and resolve unknown outcomes first");
-    return usable(await this.host.changes(id));
+    return usable(await this.host.changes(id,{shared}));
   }
   private inputs(cwd:string,paths:string[]):CheckInput[]{
     const unique=new Map<string,CheckInput>();
@@ -235,7 +235,7 @@ export class Verification {
     const checks=await this.storage.call<CheckRow[]>("checks",{sessionId});
     const reviews=await this.storage.call<ReviewRow[]>("reviews",{sessionId});
     let changes:ChangesView|null=null,error="";
-    try{changes=await this.code(sessionId);}catch(e){error=e instanceof Error?e.message:String(e);}
+    try{changes=await this.code(sessionId,true);}catch(e){error=e instanceof Error?e.message:String(e);}
     const visibleChecks:CheckView[]=[];
     let dependencyDigest:string|undefined;
     for(const check of checks){
