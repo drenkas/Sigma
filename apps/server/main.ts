@@ -62,6 +62,7 @@ async function emit(sessionId:string,type:string,payload:unknown,durable=false){
   for(const listener of listeners.get(sessionId)||[])listener(event);
 }
 const host=new PiHost(storage,dataDir,emit,controlPlanePorts);
+host.setViewerCheck(id=>!!listeners.get(id)?.size);
 host.eventEpoch=()=>eventEpoch;
 await host.init();
 // Packaged runtime carries an optional pinned proxy binary under resources/; absent in dev, where provisioning reports not_installed.
