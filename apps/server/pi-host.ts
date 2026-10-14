@@ -91,22 +91,26 @@ type PromptAdmission = { unresolvedOwner?:boolean;cleanup?:boolean; id:string;ca
 type WriteApproval = {id:string;sessionId:string;agentId:string;status:string;outcome:WriteOutcome|null;change:FileChange|null;commandId:string|null;commandStatus:string|null};
 type Send = (sessionId:string,type:string,payload:unknown, durable?:boolean)=>Promise<void>;
 
-function readPiHistory(path:string,managerDir:string,managerId:string|null,cwd:string){
+export function readPiHistory(path:string,managerDir:string,managerId:string|null,cwd:string){
   const absolute=resolve(path),root=resolve(managerDir),rel=relative(root,absolute);
   if(!rel||rel===".."||rel.startsWith(`..${sep}`)||lstatSync(absolute).isSymbolicLink())throw new Error("Pi history path is outside its saved session directory");
   const info=lstatSync(absolute);if(!info.isFile()||info.nlink!==1)throw new Error("Pi history must be one regular file");
   const fd=openSync(absolute,constants.O_RDONLY|constants.O_NOFOLLOW);let bytes:Buffer;try{bytes=readFileSync(fd);}finally{closeSync(fd);}
   let content:string;try{content=new TextDecoder("utf-8",{fatal:true}).decode(bytes);}catch{throw new Error("Pi history is not valid UTF-8");}
   if(!content||!content.endsWith("\n"))throw new Error("Pi history is empty or incomplete");
-  const lines=content.slice(0,-1).split("\n");let header:any;const ids=new Set<string>(),known=new Set(["message","thinking_level_change","model_change","compaction","branch_summary","custom","custom_message","session_info","usage","label","context_edit"]);
-  try{for(const [index,line] of lines.entries()){if(!line)throw new Error();const entry=JSON.parse(line);if(index===0){header=entry;if(entry?.type!=="session"||entry.version!==3||typeof entry.id!=="string"||typeof entry.timestamp!=="string"||typeof entry.cwd!=="string")throw new Error();continue;}if(!entry||!known.has(entry.type)||typeof entry.id!=="string"||ids.has(entry.id)||!(entry.parentId===null||typeof entry.parentId==="string"&&ids.has(entry.parentId))||typeof entry.timestamp!=="string")throw new Error();
+  const lines=content.slice(0,-1).split("\n");let header:any;const entries:unknown[]=[],ids=new Set<string>(),known=new Set(["message","thinking_level_change","model_change","compaction","branch_summary","custom","custom_message","session_info","usage","label","context_edit"]);
+  try{for(const [index,line] of lines.entries()){if(!line)throw new Error();const entry=JSON.parse(line);entries.push(entry);if(index===0){header=entry;if(entry?.type!=="session"||entry.version!==3||typeof entry.id!=="string"||typeof entry.timestamp!=="string"||typeof entry.cwd!=="string")throw new Error();continue;}if(!entry||!known.has(entry.type)||typeof entry.id!=="string"||ids.has(entry.id)||!(entry.parentId===null||typeof entry.parentId==="string"&&ids.has(entry.parentId))||typeof entry.timestamp!=="string")throw new Error();
     if(entry.type==="message"&&(!entry.message||typeof entry.message.role!=="string"||!Array.isArray(entry.message.content)&&typeof entry.message.content!=="string"))throw new Error();
     if(entry.type==="thinking_level_change"&&typeof entry.thinkingLevel!=="string")throw new Error();
     if(entry.type==="model_change"&&(typeof entry.provider!=="string"||typeof entry.modelId!=="string"))throw new Error();
     ids.add(entry.id);
   }}catch{throw new Error("Pi history contains an invalid or unsupported JSONL entry");}
   if(header?.type!=="session"||managerId!==null&&header.id!==managerId||typeof header.cwd!=="string"||resolve(header.cwd)!==resolve(cwd))throw new Error("Pi history header differs from the saved manager identity");
-  return {path:absolute,id:header.id};
+  return {path:absolute,id:header.id,entries};
+}
+/** Mirrors SessionManager.open(path,dir,cwd), whose cwdOverride branch goes straight to this private constructor, but passes the entries readPiHistory already parsed so a large history is read and parsed once. */
+export function openPiHistory(path:string,managerDir:string,cwd:string,entries:unknown[]):SessionManager{
+  return new (SessionManager as unknown as new(cwd:string,sessionDir:string,sessionFile:string,persist:boolean,options:undefined,entries:unknown[])=>SessionManager)(cwd,managerDir,path,true,undefined,entries);
 }
 
 const delegateDescription=(profile:{maxDepth:number;childTimeoutMs:number})=>`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${profile.childTimeoutMs/1000}s timeout. Child work is not automatically verified.`;
@@ -161,6 +165,14 @@ export class PiHost {
   private nativeIdentity?:(model?:import("@earendil-works/pi-ai").Model<any>)=>boolean;
   private runtime:ModelRuntime | null=null;
   private active = new Map<string,Active>();
+  /** Loaded sessions kept in memory; idle ones beyond this are unloaded and reopened from disk on next use. */
+  maxLoaded=Math.max(1,Number(process.env.SIGMA_MAX_LOADED_SESSIONS)||8);
+  /** A session used within this window is never unloaded: a request may still hold its Active across awaits. */
+  idleMs=30_000;
+  private used=new Map<string,number>();
+  private viewerCheck:(id:string)=>boolean=()=>false;
+  private trimTimer?:ReturnType<typeof setInterval>;
+  private trimQueued=false;
   private loading = new Map<string,Promise<Active>>();
   private pending = new Map<string,Pending>();
   private mode:ApprovalMode="full";
@@ -168,6 +180,10 @@ export class PiHost {
   private grants=new Map<string,Set<string>>();
   private autoMerger?:AutoMerger;
   setAutoMerger(merger:AutoMerger|undefined){this.autoMerger=merger;}
+  /** Sessions with a live event stream (or whose root has one) are never unloaded. */
+  setViewerCheck(check:(id:string)=>boolean){this.viewerCheck=check;}
+  loadedCount(){return this.active.size;}
+  isLoaded(id:string){return this.active.has(id);}
   private modeSave:Promise<void>=Promise.resolve();
   private approvalFinalizers = new Set<Promise<void>>();
   private children = new Map<string,ChildRun>();
@@ -195,7 +211,7 @@ export class PiHost {
   attachQa(qa:Qa){this.qa=qa;}
   attachBrowserUse(browserUse:BrowserUse){this.browserUse=browserUse;}
   private track(work:Promise<unknown>){this.background.add(work);void work.then(()=>{this.background.delete(work);},()=>{this.background.delete(work);this.backgroundFailure=true;});}
-  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"browser-use"),join(this.dataDir,"agent"),getAgentDir(),chromeUserDataDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
+  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"browser-use"),join(this.dataDir,"agent"),getAgentDir(),chromeUserDataDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.trimTimer=setInterval(()=>this.trimLoaded(),60_000);this.trimTimer.unref();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
   private async availableModels(){
     // SDK auth checks can throw errors containing credentials, even for an
     // unrelated provider with no models. Every availability consumer is fenced.
@@ -264,11 +280,11 @@ export class PiHost {
     if(savedRel&&savedRel!==".."&&!savedRel.startsWith(`..${sep}`)){try{lstatSync(saved);candidates.add(saved);}catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}}
     if(row.managerId){for(const name of readdirSync(managerDir))if(name.endsWith(`_${row.managerId}.jsonl`))candidates.add(join(managerDir,name));}
     if(candidates.size>1)throw new Error("Multiple Pi histories match the saved manager ID");
-    let history:string|undefined;
-    if(candidates.size){const found=readPiHistory([...candidates][0],managerDir,row.managerId,row.cwd);history=found.path;if(!row.managerId){row.managerId=found.id;await this.storage.call("sessionManager",{id:row.id,managerId:found.id});}}
+    let history:string|undefined,entries:unknown[]|undefined;
+    if(candidates.size){const found=readPiHistory([...candidates][0],managerDir,row.managerId,row.cwd);history=found.path;entries=found.entries;if(!row.managerId){row.managerId=found.id;await this.storage.call("sessionManager",{id:row.id,managerId:found.id});}}
     else if(row.managerId===null)throw new Error("Saved Pi history is missing; legacy manager identity cannot be reconstructed");
     else if(row.dispatchStarted)throw new Error("Pi history is missing after prompt dispatch may have started; inspect-only recovery is required");
-    if(history){const manager=SessionManager.open(history,managerDir,row.cwd);if(manager.getSessionId()!==row.managerId)throw new Error("Pi manager ID changed while opening history");row.file=history;return manager;}
+    if(history){const manager=openPiHistory(history,managerDir,row.cwd,entries!);if(manager.getSessionId()!==row.managerId)throw new Error("Pi manager ID changed while opening history");row.file=history;return manager;}
     const manager=SessionManager.create(row.cwd,managerDir,{id:row.managerId!}),file=manager.getSessionFile();if(!file)throw new Error("Pi manager did not reserve a history path");
     if(!await this.storage.call<boolean>("sessionFile",{id:row.id,managerId:row.managerId,file}))throw new Error("Pi manager path ownership changed");row.file=file;return manager;
   }
@@ -359,7 +375,7 @@ export class PiHost {
     return row.id;
     });
   }
-  private async open(row:RecordRow,provided?:SessionManager){
+  private async open(row:RecordRow,provided?:SessionManager):Promise<Active>{
     const manager=provided??await this.manager(row);
     if(this.closing)throw new Error("Service is shutting down");
     const context=await this.storage.call<DelegationContext>("delegationContext",{id:row.id});
@@ -473,7 +489,7 @@ export class PiHost {
         const native=this.active.get(row.id)?.session;
         if(!native)return;
         const metadata:RunMetadata={runId:randomUUID(),model:native.model?`${native.model.provider}/${native.model.id}`:row.model,reasoning:native.model?.reasoning?native.thinkingLevel:null,reasoningAvailability:native.model?native.model.reasoning?"available":"unsupported":"unavailable",title:native.sessionName??visibleMessages(native,row.cwd).find(message=>message.role==="user")?.text.slice(0,120)??null};
-        this.active.get(row.id)!.metadata=metadata;
+        const live=this.active.get(row.id);if(live)live.metadata=metadata;
         await this.storage.call("graphMetadata",{id:row.id,metadata});
       });
       // SDK turn_end supplies IDs only after SessionManager appended the messages.
@@ -552,7 +568,7 @@ export class PiHost {
         if(status==="error"&&last?.role==="assistant"&&typeof last.errorMessage==="string"&&(last.provider===AGY_UNSUPERVISED_PROVIDER_ID&&last.errorMessage.startsWith("Antigravity unsupervised request failed")||last.provider===CLAUDE_PROVIDER_ID&&last.errorMessage.startsWith("Claude Code: ")))this.track(this.send(row.rootId||row.id,"error",{message:last.errorMessage},true));
       }
     });
-    this.active.set(row.id,{session,row,unsubscribe});
+    const loaded:Active={session,row,unsubscribe};this.active.set(row.id,loaded);this.touch(row.id);return loaded;
   }
   get approvalMode():ApprovalMode{return this.mode;}
   private async loadApprovalMode(){try{const saved=JSON.parse(await readFile(join(this.dataDir,"agent-access.json"),"utf8"));this.mode=saved?.mode==="ask"?"ask":"full";}catch{this.mode=process.env.SIGMA_APPROVAL_MODE==="ask"?"ask":"full";}}
@@ -784,12 +800,12 @@ export class PiHost {
     if(combined.aborted)throw new Error("Review stopped before creation");
     await this.send(rootId,"agent_created",{id:row.id,parentId:rootId,role:"reviewer",status:"idle",model:row.model,cwd,revisionReviewer:true},true);
     if(combined.aborted)throw new Error("Review stopped before creation");check();
-    await this.open(row,manager);check();
+    const reviewer=await this.open(row,manager);check();
     await this.storage.call("commandSetupPhase",{id:commandId,from:"registered",to:"opened"});
     if(combined.aborted){await this.abortReviewer(rootId,reviewId);throw new Error("Review stopped before prompt");}
     await this.setStatus(row,"running");check();
     if(combined.aborted){await this.abortReviewer(rootId,reviewId);throw new Error("Review stopped before prompt");}
-    const session=this.active.get(row.id)!.session;
+    const session=reviewer.session;
     const onAbort=()=>{void this.abortReviewer(rootId,reviewId).catch(()=>{});};
     combined.addEventListener("abort",onAbort,{once:true});
     if(combined.aborted)onAbort();
@@ -817,12 +833,46 @@ export class PiHost {
   }
   private async get(id:string):Promise<Active>{
     if(this.closing)throw new Error("Service is shutting down");
-    const cached=this.active.get(id);if(cached)return cached;
+    const cached=this.active.get(id);if(cached){this.touch(id);return cached;}
     const existing=this.loading.get(id);if(existing)return existing;
-    const loading=(async()=>{const row=await this.storage.call<RecordRow|undefined>("session",{id});if(!row)throw new Error("Unknown session");await this.open(row);return this.active.get(id)!;})();
-    this.loading.set(id,loading);try{return await loading;}finally{this.loading.delete(id);}
+    const loading=(async()=>{const row=await this.storage.call<RecordRow|undefined>("session",{id});if(!row)throw new Error("Unknown session");return this.open(row);})();
+    this.loading.set(id,loading);try{const loaded=await loading;this.touch(id);this.queueTrim();return loaded;}finally{this.loading.delete(id);}
   }
-  private async setStatus(row:RecordRow,status:SessionView["status"]){await this.storage.call("status",{id:row.id,status});row.status=status;await this.send(row.rootId||row.id,row.parentId?"agent_status":"status",{id:row.id,status},true);}
+  private touch(id:string){this.used.set(id,Date.now());}
+  private queueTrim(){if(this.trimQueued||this.active.size<=this.maxLoaded)return;this.trimQueued=true;setTimeout(()=>{this.trimQueued=false;this.trimLoaded();},0).unref();}
+  /** Ids (sessions, roots, channels) with in-flight work; a session or its root listed here is not unloaded. null: unresolved owner work, unload nothing. */
+  private pinned():Set<string>|null{
+    const ids=new Set<string>();
+    for(const admission of this.promptAdmissions){if(admission.unresolvedOwner)return null;ids.add(admission.id);}
+    for(const [id,run] of this.children){ids.add(id);ids.add(run.row.id);ids.add(run.row.rootId||run.row.id);for(const ancestor of run.row.ancestors??[])ids.add(ancestor);}
+    for(const pending of this.pending.values()){ids.add(pending.sessionId);ids.add(pending.agentId);}
+    for(const id of [...this.loading.keys(),...this.stopping,...this.archiving,...this.admittingChildren,...this.repoDispatching,...this.deltas.keys()])ids.add(id);
+    for(const key of this.thinkings.keys())for(const id of key.split("\0"))ids.add(id);
+    for(const input of this.graphInputs.values())ids.add(input.row.id);
+    // A running agent keeps its whole delegation tree: the root awaits its children and the children report to the root.
+    for(const {row,session} of this.active.values())if(row.status==="running"||session.isStreaming){ids.add(row.id);ids.add(row.rootId||row.id);for(const ancestor of row.ancestors??[])ids.add(ancestor);}
+    return ids;
+  }
+  /** Idle, fully saved, unwatched and with no in-flight work. A history file exists only after the first assistant reply, so a session without one lives in memory alone. */
+  private evictable({row,session}:Active,now:number,pinned:Set<string>){
+    const root=row.rootId||row.id;
+    if(now-(this.used.get(row.id)??0)<this.idleMs||row.status==="running"||session.isStreaming||pinned.has(row.id)||pinned.has(root)||this.isStopping(row)||this.gitReservations.has(row.cwd)||this.viewerCheck(row.id)||this.viewerCheck(root))return false;
+    try{lstatSync(row.file);return true;}catch{return false;}
+  }
+  /** Unloads the least recently used evictable sessions until at most `maxLoaded` remain; sessions that cannot be unloaded may leave more. */
+  trimLoaded(){
+    if(this.closing||this.active.size<=this.maxLoaded)return;
+    const pinned=this.pinned();if(!pinned)return;
+    const now=Date.now(),idle=[...this.active.values()].filter(item=>this.evictable(item,now,pinned)).sort((a,b)=>(this.used.get(a.row.id)??0)-(this.used.get(b.row.id)??0));
+    for(const item of idle){if(this.active.size<=this.maxLoaded)break;this.evict(item);}
+  }
+  private evict({session,row,unsubscribe}:Active){
+    this.active.delete(row.id);this.used.delete(row.id);
+    try{unsubscribe();}catch{}
+    try{session.dispose();}catch{}
+    try{this.agy?.unbind(row.id);}catch{}
+  }
+  private async setStatus(row:RecordRow,status:SessionView["status"]){await this.storage.call("status",{id:row.id,status});row.status=status;this.touch(row.id);await this.send(row.rootId||row.id,row.parentId?"agent_status":"status",{id:row.id,status},true);}
   private queueDelta(id:string,text:string){
     const current=this.deltas.get(id);
     if(current){current.parts.push(text);return;}
@@ -878,7 +928,7 @@ export class PiHost {
       registered=true;run.registered=true;check();
       const agent:AgentView={id:row.id,parentId:parent.id,role,status:row.status,model:row.model,cwd:row.cwd};
       await this.send(row.rootId!,"agent_created",agent,true);check();
-      await this.open(row,manager);child=this.active.get(row.id)!;
+      child=await this.open(row,manager);
       await this.storage.call("commandSetupPhase",{id:commandId,from:"registered",to:"opened"});
       check();await this.setStatus(row,"running");check();
       timer=setTimeout(()=>{timedOut=true;void this.stopChild(run!).catch(()=>{});},profile.childTimeoutMs);
@@ -957,7 +1007,7 @@ export class PiHost {
     const managerDir=await realpath(setup.managerDir);if(managerDir!==setup.managerDir||managerDir!==await realpath(join(this.dataDir,"sessions")))throw new Error("Saved Pi directory identity changed");
     const matches=readdirSync(managerDir).filter(name=>name.endsWith(`_${setup.managerId}.jsonl`)).map(name=>join(managerDir,name));
     if(matches.length>1)throw new Error("Multiple Pi histories match the saved manager ID");
-    if(matches.length){const file=readPiHistory(matches[0],managerDir,setup.managerId,setup.cwd).path;return SessionManager.open(file,managerDir,setup.cwd);}
+    if(matches.length){const found=readPiHistory(matches[0],managerDir,setup.managerId,setup.cwd);return openPiHistory(found.path,managerDir,setup.cwd,found.entries);}
     if(["dispatching","ready","unknown"].includes(setup.phase))throw new Error("Pi dispatch may have started; missing history is inspect-only");
     return SessionManager.create(setup.cwd,managerDir,{id:setup.managerId});
   }
@@ -1241,7 +1291,7 @@ export class PiHost {
     await this.send(row.id,"graph_fact",payload,true);return payload;
   }
   private async prepareReceipt(row:RecordRow,source:string,toolCallId:string,cause:string,sourceMessageId?:string){
-    const messageId=sourceMessageId??[...visibleMessages(this.active.get(source)!.session,row.cwd)].reverse().find(message=>message.role==="assistant")?.id;
+    const messageId=sourceMessageId??[...visibleMessages((await this.get(source)).session,row.cwd)].reverse().find(message=>message.role==="assistant")?.id;
     const observed=messageId===undefined?null:await this.storage.call<{run:RunMetadata|null;entryId:string}|null>("graphMessageRun",{id:source,messageIndex:Number(messageId)});
     return this.fact(row,{id:`receipt:${row.id}:${toolCallId}`,kind:"result",source,target:row.id,actor:row.id,cause,toolCallId,commandId:`pi-tool:${row.id}:${toolCallId}`,outcome:"unknown",sourceRun:observed?.run??null,...(messageId?{sourceMessageId:messageId,sourceEntryId:observed?.entryId}:{})});
   }
@@ -1327,7 +1377,7 @@ export class PiHost {
   grantedTools(id:string):string[]{return [...this.grants.get(id)??[]];}
   /** Ask again for every call in this chat. */
   async revokeGrants(id:string){this.grants.delete(id);await this.send(id,"approval_grants",{tools:[]},false);}
-  beginShutdown(){this.closing=true;killAllShells();this.providerAuth?.beginShutdown();this.nativeProviders?.beginShutdown();}
+  beginShutdown(){this.closing=true;clearInterval(this.trimTimer);killAllShells();this.providerAuth?.beginShutdown();this.nativeProviders?.beginShutdown();}
   close(){
     this.beginShutdown();
     return this.closeWork??=(async()=>{
