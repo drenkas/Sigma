@@ -1214,7 +1214,7 @@ export class PiHost {
       promptAdmission.check();
       if(!await this.storage.call<boolean>("markSessionDispatch",{id:row.id}))throw new Error("Session dispatch ownership is unavailable");
       promptAdmission.check();
-      run=session.prompt(text,{...(behavior?{streamingBehavior:behavior}:{}),...(images?.length?{images}:{}),preflightResult:accepted=>{callbackSeen=true;try{promptAdmission.check();}catch(error){decide(false);throw error;}decide(accepted);}});
+      run=session.prompt(text,{...(behavior?{streamingBehavior:behavior}:{}),...(images?.length?{images}:{}),preflightResult:disposition=>{callbackSeen=true;try{promptAdmission.check();}catch(error){decide(false);if(disposition!=="started")throw error;void session.abort().catch(()=>{});return;}decide(true);}});
       if(childRun)void run.finally(releaseChild).catch(()=>{});
       void run.then(()=>{if(!callbackSeen)decide(null);},()=>{if(!callbackSeen)decide(false);});
       const accepted=await preflight;
