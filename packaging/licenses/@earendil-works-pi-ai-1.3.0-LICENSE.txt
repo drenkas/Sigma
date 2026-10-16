@@ -1,7 +1,7 @@
-Package: @earendil-works/pi-telemetry@1.2.0
+Package: @earendil-works/pi-ai@1.3.0
 License: MIT per package.json; no license file shipped in the npm tarball
-Text source: LICENSE at root of github.com/earendil-works/pi at tag v1.2.0 (packages/* have no own LICENSE)
-Date: 2026-10-14
+Text source: LICENSE at root of github.com/earendil-works/pi at tag v1.3.0 (packages/* have no own LICENSE)
+Date: 2026-10-16
 ----------------------------------------------------------------
 
 MIT License

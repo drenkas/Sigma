@@ -79,4 +79,4 @@ Git, гілка `main`. `.scratch/`, `.data/`, credentials і build artifacts н
 
 `.scratch` шляхи локальні й ignored: в іншому checkout потрібні нові перевірки. Історія й контракти приймань — [docs/history/CHANGELOG.md](docs/history/CHANGELOG.md); повні старі звіти — у Git history.
 
-Upstream: Pi coding-agent 1.2.0 (MIT); `pi-subagents@0.73.1` (MIT) переглядався як довідка, код не vendored. Кандидати QA (pi-browser-use / pi-agent-browser-native, pi-codex-computer-use / pi-computer-use) не обрані — перед адаптацією перевірити exact revision, ліцензію й notices.
+Upstream: Pi coding-agent 1.3.0 (MIT); `pi-subagents@0.73.1` (MIT) переглядався як довідка, код не vendored. Кандидати QA (pi-browser-use / pi-agent-browser-native, pi-codex-computer-use / pi-computer-use) не обрані — перед адаптацією перевірити exact revision, ліцензію й notices.
