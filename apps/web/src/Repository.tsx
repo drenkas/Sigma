@@ -18,7 +18,8 @@ export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"
   let generation=0;
   async function refresh(){
     const version=++generation;setLoading(true);setError("");
-    try{const sessionId=p.id;const [data,recovery]=await Promise.all([api<SessionRepositoryView>(`/sessions/${sessionId}/repository`),api<ReturnType<typeof recoveries>>(`/sessions/${sessionId}/git-recovery`)]);if(version===generation&&p.id===sessionId){setValue(data);setRecoveries(recovery);}}
+    // Git recovery is refused where Git actions are unavailable (the reason comes with the status), so its failure must not hide the folder status.
+    try{const sessionId=p.id;const [data,recovery]=await Promise.all([api<SessionRepositoryView>(`/sessions/${sessionId}/repository`),api<ReturnType<typeof recoveries>>(`/sessions/${sessionId}/git-recovery`).catch(()=>[])]);if(version===generation&&p.id===sessionId){setValue(data);setRecoveries(recovery);}}
     catch(e){if(version===generation){setValue(null);setError(e instanceof Error?e.message:"Cannot read Git status");}}
     finally{if(version===generation)setLoading(false);}
   }
@@ -69,12 +70,12 @@ export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"
         <div class="repo-actions">
           <button class="btn ghost sm" disabled={locked()||p.running||!f().upstream} onClick={()=>void act("pull")}>{busy()==="pull"?"Pulling…":"Pull"}</button>
           <button class="btn ghost sm" disabled={locked()||!f().branch} onClick={push}>{busy()==="push"?"Pushing…":"Push"}</button>
-          <button class="btn accent sm" disabled={locked()||p.running||!git()?.commit||!dirty(f())} onClick={()=>p.onCommit()} title={git()?.commit?"Ask the agent to write a commit message; you approve it before the commit runs":"Commit is available in direct Code sessions"}>Commit</button>
+          <button class="btn accent sm" disabled={locked()||p.running||!git()?.commit||!dirty(f())} onClick={()=>p.onCommit()} title={git()?.commit?"Ask the agent to write a commit message; you approve it before the commit runs":"Commit is available in sessions that edit the selected folder directly"}>Commit</button>
         </div>
       </Show>
     </>}</Show>
     <Show when={git()&&!git()!.enabled}><p class="hint">{git()!.reason}</p></Show>
-    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">Commit needs a direct Code session; branch, pull and push work here.</p></Show>
+    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">Commit needs a session that edits the selected folder directly; branch, pull and push work here.</p></Show>
     <For each={value()?.workspace?[value()!.workspace!]:[]}>{w=><p class="hint">{p.kind==="worktree"?"Worktree":"Isolated copy"} · <span class="mono">{w.branch??w.oid?.slice(0,7)??"detached"}</span> · {summary(w)}</p>}</For>
     <For each={recoveries()}>{item=><article class="callout error-callout"><strong>Unknown Git {item.kind}</strong><p>No Git action was replayed. Inspect the observed state before acknowledgement.</p><dl class="setup-identity"><dt>Command</dt><dd class="mono">{item.id}</dd><dt>Observed HEAD</dt><dd class="mono">{item.head??"unavailable"}</dd><dt>Expected HEAD</dt><dd class="mono">{item.expectedHead??"unavailable"}</dd><dt>Observed tree</dt><dd class="mono">{item.tree??"unavailable"}</dd><dt>Expected tree</dt><dd class="mono">{item.expectedTree??"unavailable"}</dd></dl><p>{item.reason??item.state}</p><button class="btn ghost sm" disabled={!!busy()||p.offline} onClick={()=>void refresh()}>Inspect fresh Git state</button><button class="btn accent sm" disabled={!item.canReconcile||!!busy()||p.offline} onClick={()=>void reconcile(item)}>Acknowledge observed state</button></article>}</For>
     <Show when={result()}><p class="hint repo-result" role="status">{result()}</p></Show>
