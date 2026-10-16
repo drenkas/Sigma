@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, unlink, writeFile, chmod, stat, symlink } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, unlink, writeFile, chmod, stat, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { PiHost } from "./pi-host.js";
 import { Storage } from "./storage.js";
 import { prepareCommit, executeCommit } from "./git-intents.js";
+import { gitStashes, gitWorktrees } from "./git-actions.js";
 
 const exec=promisify(execFile),fixture=resolve(import.meta.dirname,`../../.scratch/git-actions-${Date.now()}-${process.pid}`);
 process.env.PI_OFFLINE="1";process.env.SIGMA_DEMO="1";process.env.PI_CODING_AGENT_DIR=join(fixture,"agent");
@@ -151,7 +152,7 @@ test("git actions commit through an approved agent message, push, pull and switc
   }finally{await host.close();await storage.close();}
 });
 
-test("an empty chat runs switch, pull and push on its selected folder with the same barriers, but no commit",async()=>{
+test("an empty chat runs switch, pull, push and stash on its selected folder with the same barriers, but no commit; worktrees are listed",async()=>{
   const root=join(fixture,"folder");await mkdir(root,{recursive:true});
   await writeFile(join(fixture,".gitconfig"),"[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n[commit]\n\tgpgSign = false\n[init]\n\tdefaultBranch = main\n");
   const remote=join(root,"remote.git"),source=join(root,"source"),other=join(root,"other"),data=join(root,"data");
@@ -176,5 +177,32 @@ test("an empty chat runs switch, pull and push on its selected folder with the s
     await writeFile(join(source,"c.txt"),"c\n");await git(source,"add",".");await git(source,"commit","-m","Feature");
     await host.folderGitAction(source,"push",{},crypto.randomUUID());assert.equal(await git(remote,"rev-parse","feature"),await git(source,"rev-parse","HEAD"));
     assert.deepEqual(await host.folderGitRecovery(source),[]);
+
+    // Stash: save includes untracked files; apply keeps the entry, pop removes it, drop deletes it; a changed list is refused.
+    await writeFile(join(source,"a.txt"),"edited\n");await writeFile(join(source,"new.txt"),"untracked\n");
+    await host.folderGitAction(source,"stash",{op:"save",message:"WIP edits"},crypto.randomUUID());
+    assert.equal(await readFile(join(source,"a.txt"),"utf8"),"a\n");await assert.rejects(readFile(join(source,"new.txt")));
+    let [first]=await gitStashes(source);assert.equal(first.ref,"stash@{0}");assert.match(first.subject,/WIP edits/);
+    await assert.rejects(host.folderGitAction(source,"stash",{op:"save",message:"two\nlines"},crypto.randomUUID()),/one line/);
+    await assert.rejects(host.folderGitAction(source,"stash",{op:"apply",ref:"stash@{0}",oid:"0".repeat(40)},crypto.randomUUID()),/stash list changed/);
+    await assert.rejects(host.folderGitAction(source,"stash",{op:"apply",ref:"--index",oid:first.oid},crypto.randomUUID()),/stash list changed/);
+    await host.folderGitAction(source,"stash",{op:"apply",ref:first.ref,oid:first.oid},crypto.randomUUID());
+    assert.equal(await readFile(join(source,"a.txt"),"utf8"),"edited\n");assert.equal((await gitStashes(source)).length,1);
+    await git(source,"checkout","--","a.txt");await rm(join(source,"new.txt"));
+    await host.folderGitAction(source,"stash",{op:"pop",ref:first.ref,oid:first.oid},crypto.randomUUID());
+    assert.equal(await readFile(join(source,"new.txt"),"utf8"),"untracked\n");assert.deepEqual(await gitStashes(source),[]);
+    await host.folderGitAction(source,"stash",{op:"save"},crypto.randomUUID());[first]=await gitStashes(source);
+    await host.folderGitAction(source,"stash",{op:"drop",ref:first.ref,oid:first.oid},crypto.randomUUID());assert.deepEqual(await gitStashes(source),[]);
+    assert.equal(await readFile(join(source,"a.txt"),"utf8"),"a\n");
+    // Stash leaves HEAD alone but still waits for a running session in the folder.
+    await storage.call("status",{id:sid,status:"running"});
+    await assert.rejects(host.folderGitAction(source,"stash",{op:"save"},crypto.randomUUID()),/Another session in this folder is running/);
+    await storage.call("status",{id:sid,status:"settled"});
+
+    // Worktrees are listed read-only, including detached and branch worktrees.
+    const extra=join(root,"extra");await git(source,"worktree","add","--detach",extra,"main");
+    const worktrees=await gitWorktrees(source);
+    assert.deepEqual(worktrees.map(item=>[item.path,item.branch,item.detached]),[[await realpath(source),"feature",false],[await realpath(extra),null,true]]);
+    assert.equal(worktrees[1].head,await git(source,"rev-parse","main"));
   }finally{await host.close();await storage.close();}
 });
