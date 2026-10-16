@@ -671,12 +671,21 @@ export class PiHost {
     if(await realpath(row.cwd)!==row.cwd)throw new Error("Saved Git folder identity changed; create a new session on the canonical root");
     return row;
   }
-  async gitInfo(id:string){
+  /** Git on a selected folder without a session (an empty chat). Commit needs an agent to write the message, so only switch, pull and push run here. */
+  private async folderTarget(path:unknown):Promise<RecordRow>{
+    if(typeof path!=="string"||!path.startsWith("/"))throw new Error("Choose a folder");
+    const cwd=await realpath(path);if(cwd!==path)throw new Error("Use the folder's canonical path");
+    const rel=relative(await realpath(this.dataDir),cwd);if(rel===""||!rel.startsWith("..")&&!rel.startsWith("/"))throw new Error("Sigma's data folder has no Git actions");
+    return {id:`folder:${cwd}`,cwd,file:"",managerId:null,model:"",policy:null,status:"idle",parentId:null,role:"root"};
+  }
+  private async gitInfoFor(target:()=>Promise<RecordRow>){
     let row:RecordRow;
-    try{row=await this.gitTarget(id);await gitIdentity(row.cwd);}catch(error){return {enabled:false,reason:error instanceof Error?error.message:"Unavailable",commit:false,branches:[] as string[]};}
+    try{row=await target();await gitIdentity(row.cwd);}catch(error){return {enabled:false,reason:error instanceof Error?error.message:"Unavailable",commit:false,branches:[] as string[]};}
     const branches=await gitBranches(row.cwd).catch(()=>[] as string[]);
     return {enabled:true,commit:this.commitTool(row),branches};
   }
+  gitInfo(id:string){return this.gitInfoFor(()=>this.gitTarget(id));}
+  folderGitInfo(path:unknown){return this.gitInfoFor(()=>this.folderTarget(path));}
   private async gitBarrier(row:RecordRow,commandId:string,movesHead=true){
     if(await this.storage.call<boolean>("gitBlocked",{cwd:row.cwd,exceptId:commandId}))throw new Error("Repository has an unknown Git outcome; inspect it before continuing");
     const rows=(await this.storage.call<Array<{id:string;cwd:string;status:string}>>("sessions")).filter(item=>item.cwd===row.cwd&&item.id!==row.id);
@@ -686,10 +695,14 @@ export class PiHost {
     if(agents.some(item=>item.status==="running"))throw new Error("An agent in this folder is running; stop it first");
     const ids=new Set([row.id,...rows.map(item=>item.id),...agents.map(item=>item.id)]);if([...this.pending.values()].some(item=>ids.has(item.sessionId)))throw new Error("A session in this folder is waiting for an approval");
     if(await this.storage.call<boolean>("unresolvedDirectWrite",{cwd:row.cwd,includeMerges:true}))throw new Error("This folder has unresolved writes or merges; inspect them first");
-    if(movesHead&&await this.unmergedWorker(row))throw new Error("A parallel worker's changes are not merged into this folder yet; merge or decline them in Changes → Worker changes and merges first");
+    if(movesHead&&await this.unmergedWorker(row,rows.map(item=>item.id)))throw new Error("A parallel worker's changes are not merged into this folder yet; merge or decline them in Changes → Worker changes and merges first");
   }
   /** A worker that ran in its own worktree can only be merged while the root stays on the commit both started from, so moving HEAD would strand its changes. Declined merges and conflicts were already shown to the user and do not block. */
-  private async unmergedWorker(root:RecordRow){
+  private async unmergedWorker(row:RecordRow,others:string[]){
+    for(const root of [row,...await Promise.all(others.map(id=>this.storage.call<RecordRow|undefined>("session",{id})))])if(root&&await this.strandsWorker(root))return true;
+    return false;
+  }
+  private async strandsWorker(root:RecordRow){
     if(root.policy?.requested.mode!=="parallel"||root.policy.workspace?.kind!=="direct")return false;
     const merges=await this.storage.call<Array<{workerId:string;status:string}>>("workerMerges",{rootId:root.id});
     for(const agent of await this.storage.call<Array<{id:string;parentId:string|null;role:string}>>("agents",{rootId:root.id})){
@@ -741,9 +754,11 @@ export class PiHost {
       }
     }).finally(()=>this.gitReservations.delete(row.cwd));
   }
-  async gitAction(id:string,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){
+  gitAction(id:string,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(id,()=>this.gitTarget(id),action,body,commandId);}
+  folderGitAction(path:unknown,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(`folder:${path}`,()=>this.folderTarget(path),action,body,commandId);}
+  private async runGitAction(id:string,target:()=>Promise<RecordRow>,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){
     return this.withPromptAdmission(id,async owner=>{
-    const row=await this.gitTarget(id);owner.check();if(row.status==="running")throw new Error("Wait for the run to finish");
+    const row=await target();owner.check();if(row.status==="running")throw new Error("Wait for the run to finish");
     if(!commandId||commandId.length>200)throw new Error("X-Command-Id required for Git actions");
     return this.gitOperation(row,commandId,action,action==="switch"?{branch:body.branch}:{},async(intent,save,admission)=>{
       if((action==="pull"||action==="push")&&intent.identity.ref==="HEAD")throw new Error("HEAD is detached; switch to a branch first");
@@ -754,14 +769,18 @@ export class PiHost {
     });
     });
   }
-  async gitRecovery(id:string){const row=await this.gitTarget(id),cwd=await realpath(row.cwd);return Promise.all((await this.storage.call<GitIntent[]>("gitRecoveries",{cwd})).map(inspectGit));}
-  async reconcileGit(id:string,commandId:string,expected:{acknowledge?:boolean;digest?:string}){
-    const row=await this.gitTarget(id);if(this.gitReservations.has(row.cwd))throw new Error("Repository Git finalization is active");this.gitReservations.add(row.cwd);
+  gitRecovery(id:string){return this.gitRecoveryFor(()=>this.gitTarget(id));}
+  folderGitRecovery(path:unknown){return this.gitRecoveryFor(()=>this.folderTarget(path));}
+  private async gitRecoveryFor(target:()=>Promise<RecordRow>){const row=await target(),cwd=await realpath(row.cwd);return Promise.all((await this.storage.call<GitIntent[]>("gitRecoveries",{cwd})).map(inspectGit));}
+  reconcileGit(id:string,commandId:string,expected:{acknowledge?:boolean;digest?:string}){return this.reconcileGitFor(id,()=>this.gitTarget(id),commandId,expected);}
+  folderReconcileGit(path:unknown,commandId:string,expected:{acknowledge?:boolean;digest?:string}){return this.reconcileGitFor(`folder:${path}`,()=>this.folderTarget(path),commandId,expected);}
+  private async reconcileGitFor(id:string,target:()=>Promise<RecordRow>,commandId:string,expected:{acknowledge?:boolean;digest?:string}){
+    const row=await target();if(this.gitReservations.has(row.cwd))throw new Error("Repository Git finalization is active");this.gitReservations.add(row.cwd);
     return this.withPromptAdmission(id,async admission=>{
       const intent=await this.storage.call<GitIntent&{status:string}>("gitGet",{id:commandId});if(!intent||intent.status!=="unknown"||intent.identity.cwd!==await realpath(row.cwd))throw new Error("Git command is not awaiting reconciliation");
       if(row.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(row,commandId,false);admission.check();
       const view=await inspectGit(intent);if(!view.canReconcile||expected?.acknowledge!==true||view.digest!==expected.digest)throw new Error(view.reason??"Git observations changed; inspect again before acknowledgement");
-      admission.check();const current=await this.gitTarget(id);if(current.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(current,commandId,false);const fresh=await inspectGit(intent);if(fresh.digest!==view.digest||!fresh.canReconcile)throw new Error("Git observations changed during acknowledgement; inspect again");await finalizeGit(intent,fresh);
+      admission.check();const current=await target();if(current.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(current,commandId,false);const fresh=await inspectGit(intent);if(fresh.digest!==view.digest||!fresh.canReconcile)throw new Error("Git observations changed during acknowledgement; inspect again");await finalizeGit(intent,fresh);
       await this.storage.call("gitComplete",{id:commandId,from:intent.identity.head,to:view.head,reconciled:true,receipt:{sha:view.head,tree:view.tree,state:view.state,digest:view.digest,at:Date.now()}});
       await this.syncGit(row.cwd,intent.identity.head,view.head!);return view;
     }).finally(()=>this.gitReservations.delete(row.cwd));

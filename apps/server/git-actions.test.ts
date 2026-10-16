@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, unlink, writeFile, chmod, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, unlink, writeFile, chmod, stat, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { PiHost } from "./pi-host.js";
@@ -148,5 +148,33 @@ test("git actions commit through an approved agent message, push, pull and switc
     const stoppedHead=await git(source,"rev-parse","HEAD"),stoppedIndex=await git(source,"ls-files","--stage","-z");
     await host.abort(sid);await assert.rejects(stopped,/Commit denied/);
     assert.equal(await git(source,"rev-parse","HEAD"),stoppedHead);assert.equal(await git(source,"ls-files","--stage","-z"),stoppedIndex);
+  }finally{await host.close();await storage.close();}
+});
+
+test("an empty chat runs switch, pull and push on its selected folder with the same barriers, but no commit",async()=>{
+  const root=join(fixture,"folder");await mkdir(root,{recursive:true});
+  await writeFile(join(fixture,".gitconfig"),"[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n[commit]\n\tgpgSign = false\n[init]\n\tdefaultBranch = main\n");
+  const remote=join(root,"remote.git"),source=join(root,"source"),other=join(root,"other"),data=join(root,"data");
+  await git(root,"init","--bare","-b","main",remote);await git(root,"clone",remote,source);
+  await writeFile(join(source,"a.txt"),"a\n");await git(source,"add",".");await git(source,"commit","-m","Fixture");await git(source,"push","-u","origin","main");await git(source,"branch","feature");await mkdir(data);
+  const storage=new Storage(join(data,"state.sqlite"));const host=new PiHost(storage,data,async(id,type,payload,durable)=>{if(durable)await storage.event(id,type,payload);});
+  await host.init();
+  try{
+    assert.deepEqual(await host.folderGitInfo(source),{enabled:true,commit:false,branches:["feature","main"]});
+    await symlink(source,join(root,"alias"));assert.match((await host.folderGitInfo(join(root,"alias"))).reason??"",/canonical path/);
+    assert.match((await host.folderGitInfo("relative")).reason??"",/Choose a folder/);
+    assert.match((await host.folderGitInfo(data)).reason??"",/data folder/);
+    await git(root,"clone",remote,other);await writeFile(join(other,"b.txt"),"b\n");await git(other,"add",".");await git(other,"commit","-m","Elsewhere");await git(other,"push");
+    const sid=await host.create(source,"sigma-demo/offline",crypto.randomUUID(),"parallel");
+    await storage.call("status",{id:sid,status:"running"});
+    await assert.rejects(host.folderGitAction(source,"pull",{},crypto.randomUUID()),/Another session in this folder is running/);
+    await storage.call("status",{id:sid,status:"settled"});
+    await host.folderGitAction(source,"pull",{},crypto.randomUUID());
+    const pulled=await git(source,"rev-parse","HEAD");assert.equal(pulled,await git(other,"rev-parse","HEAD"));
+    assert.equal((await host.snapshot(sid)).policy?.workspace?.baseCommit,pulled,"sessions on the folder follow HEAD");
+    await host.folderGitAction(source,"switch",{branch:"feature"},crypto.randomUUID());assert.equal(await git(source,"branch","--show-current"),"feature");
+    await writeFile(join(source,"c.txt"),"c\n");await git(source,"add",".");await git(source,"commit","-m","Feature");
+    await host.folderGitAction(source,"push",{},crypto.randomUUID());assert.equal(await git(remote,"rev-parse","feature"),await git(source,"rev-parse","HEAD"));
+    assert.deepEqual(await host.folderGitRecovery(source),[]);
   }finally{await host.close();await storage.close();}
 });
