@@ -792,11 +792,13 @@ function App(){
     <Show when={p.child&&!p.agent.revisionReviewer&&profile().maxDepth>0&&(p.agent.status==="idle"||p.agent.status==="running")}><button type="button" class="btn danger-ghost sm" disabled={offline()||stoppingChildren().includes(p.agent.id)} onClick={()=>stopChild(p.agent)} aria-label={`Stop ${p.agent.role} ${short(p.agent.id)}`}><Icon name="stop"/>{stoppingChildren().includes(p.agent.id)?"Stopping…":"Stop child"}</button></Show>
   </li>;
   const AgentBranch=(p:{agent:AgentView})=><><AgentRow agent={p.agent} child/><Show when={children().some(agent=>agent.parentId===p.agent.id)}><li class="tree-children"><ul><For each={children().filter(agent=>agent.parentId===p.agent.id)}>{agent=><AgentBranch agent={agent}/>}</For></ul></li></Show></>;
+  // Without a session only the Repository tab has content: the selected folder's Git status and actions.
+  const shownTab=():DetailTab=>current()?detailTab():"repository";
   const DETAIL_TABS:{id:DetailTab;label:string}[]=[{id:"overview",label:"Overview"},{id:"changes",label:"Changes"},{id:"repository",label:"Repository"},{id:"activity",label:"Activity"},{id:"graph",label:"Graph"}];
   const tabCount=(id:DetailTab)=>!current()?0:id==="overview"?current()!.recoveryInputs.length+current()!.recoveryActions.length+childTrouble().filter(a=>a.status==="error").length:id==="changes"?pending().length+mergePending()+directNeeds():0;
   function tabKeys(e:KeyboardEvent){
     if(!["ArrowLeft","ArrowRight","Home","End"].includes(e.key))return;e.preventDefault();
-    const i=DETAIL_TABS.findIndex(t=>t.id===detailTab()),n=DETAIL_TABS.length;
+    if(!current())return;const i=DETAIL_TABS.findIndex(t=>t.id===detailTab()),n=DETAIL_TABS.length;
     const next=e.key==="Home"?0:e.key==="End"?n-1:(i+(e.key==="ArrowRight"?1:n-1))%n;
     setDetailTab(DETAIL_TABS[next].id);document.getElementById(`tab-${DETAIL_TABS[next].id}`)?.focus();
   }
@@ -805,7 +807,7 @@ function App(){
     <div class="col-head details-head">
       <h2 ref={detailsTitle} class="sr-only" tabindex="-1">Session details</h2>
       <div class="tabs" role="tablist" aria-label="Session details" onKeyDown={tabKeys}>
-        <For each={DETAIL_TABS}>{t=><button id={`tab-${t.id}`} role="tab" class="tab" aria-selected={detailTab()===t.id} aria-controls={`panel-${t.id}`} tabindex={detailTab()===t.id?0:-1} disabled={!current()} onClick={()=>setDetailTab(t.id)}>
+        <For each={DETAIL_TABS}>{t=><button id={`tab-${t.id}`} role="tab" class="tab" aria-selected={shownTab()===t.id} aria-controls={`panel-${t.id}`} tabindex={shownTab()===t.id?0:-1} disabled={!current()&&t.id!=="repository"} onClick={()=>setDetailTab(t.id)}>
           {t.label}<Show when={tabCount(t.id)}><span class="pip">{tabCount(t.id)}</span></Show>
         </button>}</For>
       </div>
@@ -813,7 +815,11 @@ function App(){
       <button class="icon-btn drawer-close only-details" onClick={()=>closeDetails()} aria-label="Close session details"><Icon name="close"/></button>
     </div>
     <div class="details-body">
-      <Show when={current()} fallback={<p class="muted pad">Start or open a session to see its changes, repository, agents and tool activity.</p>}>
+      <Show when={current()} fallback={<Show when={workspace()} fallback={<p class="muted pad">Start or open a session to see its changes, agents and tool activity. Choose a folder to see its repository.</p>}>
+        <div id="panel-repository" role="tabpanel" aria-labelledby="tab-repository" class="tab-panel">
+          <Repository id={`folder:${workspace()}`} folder={workspace()} revision={workspace()} kind={null} running={busy()} offline={offline()} onCommit={()=>{}} active={panelShown()}/>
+        </div>
+      </Show>}>
         <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" class="tab-panel" hidden={detailTab()!=="overview"}>
           <section class="panel" aria-labelledby="h-summary">
             <h3 id="h-summary" class="panel-title">Summary</h3>

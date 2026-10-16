@@ -11,26 +11,30 @@ function summary(f:FolderStatus){
   return parts.length?parts.join(" · "):"Clean";
 }
 
-export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"|"clone"|null;running:boolean;offline:boolean;onCommit:()=>void;active:boolean}){
+/** `folder` shows the panel for a selected folder before any session exists (an empty chat); `id` then only keys the view. */
+export function Repository(p:{id:string;folder?:string;revision:string;kind:"direct"|"worktree"|"clone"|null;running:boolean;offline:boolean;onCommit:()=>void;active:boolean}){
   const [value,setValue]=createSignal<SessionRepositoryView|null>(null),[error,setError]=createSignal(""),[loading,setLoading]=createSignal(false);
   const [recoveries,setRecoveries]=createSignal<Array<{id:string;kind:string;head:string|null;tree:string|null;expectedHead:string|null;expectedTree:string|null;state:string;reason?:string;digest:string;canReconcile:boolean}>>([]);
   const [busy,setBusy]=createSignal<string|null>(null),[result,setResult]=createSignal("");
   let generation=0;
+  const query=()=>`?path=${encodeURIComponent(p.folder!)}`;
+  const route=(path:string)=>p.folder!==undefined?`/folders/${path}${path==="repository"||path==="git-recovery"?query():""}`:`/sessions/${p.id}/${path}`;
+  const scoped=(body:object)=>p.folder!==undefined?{...body,path:p.folder}:body;
   async function refresh(){
     const version=++generation;setLoading(true);setError("");
     // Git recovery is refused where Git actions are unavailable (the reason comes with the status), so its failure must not hide the folder status.
-    try{const sessionId=p.id;const [data,recovery]=await Promise.all([api<SessionRepositoryView>(`/sessions/${sessionId}/repository`),api<ReturnType<typeof recoveries>>(`/sessions/${sessionId}/git-recovery`).catch(()=>[])]);if(version===generation&&p.id===sessionId){setValue(data);setRecoveries(recovery);}}
+    try{const sessionId=p.id;const [data,recovery]=await Promise.all([api<SessionRepositoryView>(route("repository")),api<ReturnType<typeof recoveries>>(route("git-recovery")).catch(()=>[])]);if(version===generation&&p.id===sessionId){setValue(data);setRecoveries(recovery);}}
     catch(e){if(version===generation){setValue(null);setError(e instanceof Error?e.message:"Cannot read Git status");}}
     finally{if(version===generation)setLoading(false);}
   }
   let seen=p.id;createEffect(()=>{const id=p.id;p.revision;if(p.active){seen=id;setResult("");void refresh();}else{generation++;setLoading(false);if(id!==seen){seen=id;setValue(null);setRecoveries([]);setError("");setResult("");}}});onCleanup(()=>{generation++;});
   async function act(action:"switch"|"pull"|"push",body:object={}){
     setBusy(action);setError("");setResult("");
-    try{const data=await api<{output:string}>(`/sessions/${p.id}/git/${action}`,"POST",body,crypto.randomUUID());setResult(action==="switch"?"Branch switched.":data.output?data.output.split("\n").slice(-2).join(" "):action==="pull"?"Already up to date.":"Pushed.");}
+    try{const data=await api<{output:string}>(route(`git/${action}`),"POST",scoped(body),crypto.randomUUID());setResult(action==="switch"?"Branch switched.":data.output?data.output.split("\n").slice(-2).join(" "):action==="pull"?"Already up to date.":"Pushed.");}
     catch(e){setError(e instanceof Error?e.message:"Git action failed");}
     finally{setBusy(null);void refresh();}
   }
-  async function reconcile(item:ReturnType<typeof recoveries>[number]){setBusy(item.id);setError("");try{await api(`/sessions/${p.id}/git-reconcile`,"POST",{commandId:item.id,acknowledge:true,digest:item.digest});setResult("Observed Git state acknowledged; no action was replayed.");}catch(e){setError(e instanceof Error?e.message:"Git reconciliation failed");}finally{setBusy(null);void refresh();}}
+  async function reconcile(item:ReturnType<typeof recoveries>[number]){setBusy(item.id);setError("");try{await api(route("git-reconcile"),"POST",scoped({commandId:item.id,acknowledge:true,digest:item.digest}));setResult("Observed Git state acknowledged; no action was replayed.");}catch(e){setError(e instanceof Error?e.message:"Git reconciliation failed");}finally{setBusy(null);void refresh();}}
   const git=()=>value()?.git;
   const source=()=>value()?.source;
   const locked=()=>recoveries().length>0||!!busy()||p.offline||!git()?.enabled||source()?.state!=="git";
@@ -75,7 +79,7 @@ export function Repository(p:{id:string;revision:string;kind:"direct"|"worktree"
       </Show>
     </>}</Show>
     <Show when={git()&&!git()!.enabled}><p class="hint">{git()!.reason}</p></Show>
-    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">Commit needs a session that edits the selected folder directly; branch, pull and push work here.</p></Show>
+    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">{p.folder!==undefined?"Commit needs a chat: send a message to start one in this folder; branch, pull and push work here.":"Commit needs a session that edits the selected folder directly; branch, pull and push work here."}</p></Show>
     <For each={value()?.workspace?[value()!.workspace!]:[]}>{w=><p class="hint">{p.kind==="worktree"?"Worktree":"Isolated copy"} · <span class="mono">{w.branch??w.oid?.slice(0,7)??"detached"}</span> · {summary(w)}</p>}</For>
     <For each={recoveries()}>{item=><article class="callout error-callout"><strong>Unknown Git {item.kind}</strong><p>No Git action was replayed. Inspect the observed state before acknowledgement.</p><dl class="setup-identity"><dt>Command</dt><dd class="mono">{item.id}</dd><dt>Observed HEAD</dt><dd class="mono">{item.head??"unavailable"}</dd><dt>Expected HEAD</dt><dd class="mono">{item.expectedHead??"unavailable"}</dd><dt>Observed tree</dt><dd class="mono">{item.tree??"unavailable"}</dd><dt>Expected tree</dt><dd class="mono">{item.expectedTree??"unavailable"}</dd></dl><p>{item.reason??item.state}</p><button class="btn ghost sm" disabled={!!busy()||p.offline} onClick={()=>void refresh()}>Inspect fresh Git state</button><button class="btn accent sm" disabled={!item.canReconcile||!!busy()||p.offline} onClick={()=>void reconcile(item)}>Acknowledge observed state</button></article>}</For>
     <Show when={result()}><p class="hint repo-result" role="status">{result()}</p></Show>

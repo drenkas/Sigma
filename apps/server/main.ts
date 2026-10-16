@@ -299,6 +299,19 @@ app.post<{Params:{id:string;action:string};Body:{branch?:unknown}}>("/api/sessio
 });
 app.get<{Params:{id:string}}>("/api/sessions/:id/git-recovery",async(req,reply)=>{try{return await host.gitRecovery(req.params.id);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git recovery unavailable"});}});
 app.post<{Params:{id:string};Body:{commandId:string;acknowledge:true;digest:string}}>("/api/sessions/:id/git-reconcile",async(req,reply)=>{try{return await host.reconcileGit(req.params.id,req.body?.commandId,req.body);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git reconciliation unavailable"});}});
+// The same Git panel for a selected folder before any session exists (an empty chat).
+app.get<{Querystring:{path?:string}}>("/api/folders/repository",async(req,reply)=>{
+  const path=req.query.path??"";if(!path.startsWith("/"))return reply.code(400).send({error:"Folder path required"});
+  const [source,git]=await Promise.all([folderStatus(path),host.folderGitInfo(path)]);
+  return {checkedAt:Date.now(),source,workspace:null,git};
+});
+app.post<{Params:{action:string};Body:{path?:unknown;branch?:unknown}}>("/api/folders/git/:action",async(req,reply)=>{
+  const action=req.params.action;
+  if(action!=="switch"&&action!=="pull"&&action!=="push")return reply.code(404).send({error:"Unknown Git action"});
+  try{return await host.folderGitAction(req.body?.path,action,req.body??{},typeof req.headers["x-command-id"]==="string"?req.headers["x-command-id"]:undefined);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git action failed"});}
+});
+app.get<{Querystring:{path?:string}}>("/api/folders/git-recovery",async(req,reply)=>{try{return await host.folderGitRecovery(req.query.path);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git recovery unavailable"});}});
+app.post<{Body:{path?:unknown;commandId:string;acknowledge:true;digest:string}}>("/api/folders/git-reconcile",async(req,reply)=>{try{return await host.folderReconcileGit(req.body?.path,req.body?.commandId,req.body);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git reconciliation unavailable"});}});
 app.get<{Params:{id:string;agentId:string}}>("/api/sessions/:id/agents/:agentId",async(req,reply)=>{
   try{return await host.childSnapshot(req.params.id,req.params.agentId);}catch{return reply.code(404).send({error:"Child unavailable"});}
 });
