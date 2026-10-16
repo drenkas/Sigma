@@ -3,7 +3,7 @@ import { AGENT_ROLES, type AgentRole, type RoleCatalog, type RoleReasoning } fro
 import { api } from "./api.js";
 
 type Model={provider:string;id:string;name:string;reasoningLevels?:string[];legacy?:boolean};
-const LABELS:Record<AgentRole,string>={planner:"Planner",researcher:"Researcher",worker:"Implementation",reviewer:"Reviewer",qa:"QA"};
+export const LABELS:Record<AgentRole,string>={planner:"Planner",researcher:"Researcher",worker:"Implementation",reviewer:"Reviewer",qa:"QA"};
 export function Roles(p:{models:Model[];menu:JSX.Element;onClose:()=>void;pending:number}) {
   const [catalog,setCatalog]=createSignal<RoleCatalog|null>(null),[busy,setBusy]=createSignal(false),[error,setError]=createSignal(""),[saved,setSaved]=createSignal(false);
   async function load(){setBusy(true);setError("");try{setCatalog((await api<{catalog:RoleCatalog}>("/roles")).catalog);}catch(e){setError(String(e));}finally{setBusy(false);}}
@@ -19,7 +19,7 @@ export function Roles(p:{models:Model[];menu:JSX.Element;onClose:()=>void;pendin
     <header class="col-head main-head">{p.menu}<div class="head-title"><h1 id="roles-title" class="title" tabindex="-1">Agents</h1><span class="muted small">Model and reasoning for each agent</span></div><button class="btn ghost sm" onClick={p.onClose}>Chat<Show when={p.pending}><span class="pip">{p.pending}</span></Show></button></header>
     <Show when={p.pending}><div class="banner warning" role="status">A chat is waiting for approval.<button class="link-btn" onClick={p.onClose}>Review in chat</button></div></Show>
     <div class="scroller"><div class="project-content">
-      <p class="field-help">The chat model is the orchestrator and decides which agents to call. Pick a model and reasoning for each agent; it applies to new chats.</p>
+      <p class="field-help">The chat model is the orchestrator and decides which agents to call. Pick a model and reasoning for each agent; it applies to new chats. A project can change any of these for its own chats under Edit project.</p>
       <Show when={error()}><p class="banner error" role="alert">{error()}</p></Show>
       <Show when={saved()}><p class="banner info" role="status">Saved for new chats.</p></Show>
       <Show when={catalog()}><section class="repo-card" aria-label="Agent models"><For each={AGENT_ROLES}>{role=>

@@ -1,9 +1,15 @@
 import { createEffect, createMemo, createSignal, For, Show, onCleanup, type JSX } from "solid-js";
-import type { ProjectStatus, ProjectView } from "../../../packages/contracts/index.js";
+import { AGENT_ROLES, type AgentRole, type ProjectRoleOverride, type ProjectStatus, type ProjectView, type RoleCatalog, type RoleReasoning } from "../../../packages/contracts/index.js";
 import { api } from "./api.js";
+import { LABELS } from "./Roles.js";
 
-export function Projects(p:{project:ProjectView|undefined;onSaved:(project:ProjectView)=>void;onFolder:(path:string)=>void;onCreateTask:(project:ProjectView,workspaceMode:"direct"|"worktree")=>void;taskBusy:boolean;model:string;onClose:()=>void;menu:JSX.Element;pending:number;editRequest:number}){
-  const [draft,setDraft]=createSignal<{id:string;name:string;folders:string[]}|null>(null);
+type Model={provider:string;id:string;name:string;reasoningLevels?:string[];legacy?:boolean};
+const ALL_LEVELS=["off","minimal","low","medium","high","xhigh","max"],GLOBAL="global";
+const has=(item:ProjectRoleOverride|undefined,key:"model"|"reasoning")=>!!item&&Object.prototype.hasOwnProperty.call(item,key);
+
+export function Projects(p:{project:ProjectView|undefined;models:Model[];onSaved:(project:ProjectView)=>void;onFolder:(path:string)=>void;onCreateTask:(project:ProjectView,workspaceMode:"direct"|"worktree")=>void;taskBusy:boolean;model:string;onClose:()=>void;menu:JSX.Element;pending:number;editRequest:number}){
+  const [draft,setDraft]=createSignal<{id:string;name:string;folders:string[];agents:ProjectRoleOverride[]}|null>(null);
+  const [globalRoles,setGlobalRoles]=createSignal<RoleCatalog|null>(null);
   const [taskWorkspaceMode,setTaskWorkspaceMode]=createSignal<"direct"|"worktree">("direct");
   const [choosing,setChoosing]=createSignal(false);
   const [status,setStatus]=createSignal<ProjectStatus|null>(null),[loading,setLoading]=createSignal(false),[saving,setSaving]=createSignal(false),[error,setError]=createSignal("");
@@ -23,7 +29,28 @@ export function Projects(p:{project:ProjectView|undefined;onSaved:(project:Proje
   let handledEdit=0;
   createEffect(()=>{const project=p.project,request=p.editRequest;picker?.abort();setDraft(null);void refresh(project);if(request&&request!==handledEdit){handledEdit=request;edit(project);}});
   onCleanup(()=>{generation++;picker?.abort();});
-  function edit(project?:ProjectView){setError("");setDraft({id:project?.id??crypto.randomUUID(),name:project?.name??"",folders:project?.folders??[]});}
+  function edit(project?:ProjectView){
+    setError("");setDraft({id:project?.id??crypto.randomUUID(),name:project?.name??"",folders:project?.folders??[],agents:structuredClone(project?.agents??[])});
+    api<{catalog:RoleCatalog}>("/roles").then(({catalog})=>setGlobalRoles(catalog),()=>setGlobalRoles(null));
+  }
+  const modelLabel=(key:string|null)=>{if(!key)return "Same as chat model";const model=p.models.find(m=>`${m.provider}/${m.id}`===key);return model?`${model.provider} · ${model.name||model.id}`:`${key} · unavailable`;};
+  const globalOf=(role:AgentRole)=>globalRoles()?.roles.find(item=>item.role===role);
+  const overrideOf=(role:AgentRole)=>draft()?.agents.find(item=>item.role===role);
+  const effectiveModel=(role:AgentRole)=>{const own=overrideOf(role);return has(own,"model")?own!.model??null:globalOf(role)?.model??null;};
+  const levels=(role:AgentRole)=>{const key=effectiveModel(role);return (key&&p.models.find(m=>`${m.provider}/${m.id}`===key)?.reasoningLevels)||ALL_LEVELS;};
+  /** Sets or clears ("global") one field of a role's project override; a row with no fields left is removed. */
+  function changeAgent(role:AgentRole,field:"model"|"reasoning",value:string){
+    setDraft(d=>{
+      if(!d)return d;
+      const next:ProjectRoleOverride={...(d.agents.find(item=>item.role===role)??{role})};
+      if(value===GLOBAL)delete next[field];else if(field==="model")next.model=value||null;else next.reasoning=(value||null) as RoleReasoning|null;
+      const agents=d.agents.filter(item=>item.role!==role);
+      if(has(next,"model")||has(next,"reasoning"))agents.push(next);
+      return {...d,agents};
+    });
+    const own=overrideOf(role);
+    if(field==="model"&&own?.reasoning&&!levels(role).includes(own.reasoning))changeAgent(role,"reasoning",GLOBAL);
+  }
   async function pick(){
     const id=draft()?.id;if(!id||choosing())return;
     setChoosing(true);setError("");const request=new AbortController();picker=request;
@@ -39,7 +66,7 @@ export function Projects(p:{project:ProjectView|undefined;onSaved:(project:Proje
   async function save(){
     const value=draft();if(!value||saving())return;setSaving(true);setError("");
     try{
-      const {project}=await api<{project:ProjectView}>(`/projects/${value.id}`,"PUT",{name:value.name,folders:value.folders});
+      const {project}=await api<{project:ProjectView}>(`/projects/${value.id}`,"PUT",{name:value.name,folders:value.folders,agents:value.agents});
       setDraft(null);p.onSaved(project);
     }catch(e){setError(e instanceof Error?e.message:"Cannot save project");}
     finally{setSaving(false);}
@@ -71,9 +98,29 @@ export function Projects(p:{project:ProjectView|undefined;onSaved:(project:Proje
             </Show>
           </div>
           <p class="field-help">Up to 20 existing folders. Git repositories and ordinary directories can be grouped together. Editing this list only changes the group.</p>
+          <fieldset class="field project-agents" aria-describedby="project-agents-help">
+            <legend class="field-label">Agents in this project</legend>
+            <p id="project-agents-help" class="field-help">New chats in this project use these models and reasoning levels. Global keeps the value from the Agents page, which also applies to chats outside projects.</p>
+            <For each={AGENT_ROLES}>{role=><div class="role-row">
+              <span class="role-name">{LABELS[role]}</span>
+              <select class="input" id={`project-agent-${role}-model`} aria-label={`${LABELS[role]} model in this project`} value={has(overrideOf(role),"model")?overrideOf(role)!.model??"":GLOBAL} disabled={saving()} onChange={e=>changeAgent(role,"model",e.currentTarget.value)}>
+                <option value={GLOBAL}>Global · {globalRoles()?modelLabel(globalOf(role)?.model??null):"Agents page"}</option>
+                <option value="">Same as chat model</option>
+                <Show when={overrideOf(role)?.model&&!p.models.some(m=>`${m.provider}/${m.id}`===overrideOf(role)!.model)}><option value={overrideOf(role)!.model!}>{overrideOf(role)!.model} · unavailable</option></Show>
+                <For each={p.models.filter(m=>!m.legacy||`${m.provider}/${m.id}`===overrideOf(role)?.model)}>{m=><option value={`${m.provider}/${m.id}`}>{m.provider} · {m.name||m.id}</option>}</For>
+              </select>
+              <select class="input" id={`project-agent-${role}-reasoning`} aria-label={`${LABELS[role]} reasoning in this project`} value={has(overrideOf(role),"reasoning")?overrideOf(role)!.reasoning??"":GLOBAL} disabled={saving()} onChange={e=>changeAgent(role,"reasoning",e.currentTarget.value)}>
+                <option value={GLOBAL}>Global · {globalRoles()?globalOf(role)?.reasoning??"Model default":"Agents page"}</option>
+                <option value="">Model default</option>
+                <Show when={overrideOf(role)?.reasoning&&!levels(role).includes(overrideOf(role)!.reasoning!)}><option value={overrideOf(role)!.reasoning!}>{overrideOf(role)!.reasoning} · unavailable</option></Show>
+                <For each={levels(role).filter(level=>level!=="off"||levels(role).length>1)}>{level=><option value={level}>{level}</option>}</For>
+              </select>
+            </div>}</For>
+          </fieldset>
           <div class="project-actions"><button class="btn primary" type="submit" disabled={saving()||choosing()||!value().folders.length}>{saving()?"Saving…":"Save project"}</button><button class="btn ghost" type="button" disabled={saving()} onClick={()=>{picker?.abort();setDraft(null);}}>Cancel</button></div>
         </form>}</Show>
         <Show when={!p.project&&!draft()}><div class="project-empty"><h2>Group the folders you work on</h2><p>Create a named project for your frontend, backend and any other folders. Each repository keeps its own Git state.</p><p class="muted">Use one folder for a session, or select a project with two Git repositories to start a multi-repository task.</p></div></Show>
+        <Show when={p.project?.agents?.length&&!draft()}><p class="field-help">Agents: {AGENT_ROLES.filter(role=>p.project!.agents!.some(item=>item.role===role)).map(role=>LABELS[role]).join(", ")} use this project's settings; the rest follow the Agents page.</p></Show>
         <Show when={p.project}>
           <p class="field-help">Ahead (push) and behind (pull) use the locally known upstream. Refresh reads local Git data; it does not fetch, pull or push. A separately configured push target may differ.</p>
           <Show when={loading()}><p role="status" class="muted">Reading repository status…</p></Show>

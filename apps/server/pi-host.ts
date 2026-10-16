@@ -20,14 +20,14 @@ import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch } fro
 import { prepareCommit, executeCommit, gitIdentity, dispatchGit, inspectGit, finalizeGit, type GitIntent } from "./git-intents.js";
 import { stripMentionContext, type MentionTool } from "./mentions.js";
 import { ASK_USER_TOOL, askQuestion, askUserTool } from "./ask-user.js";
-import { defaultRoles, normalizeRoles, roleInput, resolveRole } from "./roles.js";
+import { applyProjectAgents, defaultRoles, normalizeRoles, roleInput, resolveRole } from "./roles.js";
 import { NativeCli, NATIVE_PROVIDER_IDS, AGY_UNSUPERVISED_PROVIDER_ID, CLAUDE_PROVIDER_ID } from "./native-cli.js";
 import { registerAgyUnsupervisedProvider } from "./agy-provider.js";
 import { registerClaudeProvider } from "./claude-provider.js";
 import { ProviderAuth } from "./provider-auth.js";
 import { CliproxyProvider, CLIPROXY_PROVIDER_ID } from "./cliproxy-provider.js";
 import { geminiNonFlash, previousGeneration } from "./model-generations.js";
-import type { ChangesView, WorkStep, WorkView, RoleCatalog, RoleReasoning, RoleType, SessionRole, WorkspaceSetup, WorkspaceRecoveryItem } from "../../packages/contracts/index.js";
+import type { ChangesView, ProjectRoleOverride, WorkStep, WorkView, RoleCatalog, RoleReasoning, RoleType, SessionRole, WorkspaceSetup, WorkspaceRecoveryItem } from "../../packages/contracts/index.js";
 
 /** Short, user-facing target of a tool call: a cwd-relative path, the commit subject or the delegated role. */
 function toolDetail(cwd:string,tool:string,args:any):string|undefined{
@@ -233,6 +233,20 @@ export class PiHost {
       if(item.reasoning&&!getSupportedThinkingLevels(model).includes(item.reasoning))throw new Error("Reasoning level is unavailable for the configured model");
     }
     return this.storage.call<RoleCatalog>("saveRoles",{catalog});
+  }
+  /** The role catalog new chats and tasks in this project snapshot: the global Agents settings with the project's overrides on top. */
+  async projectRoles(project?:{agents?:ProjectRoleOverride[]}):Promise<RoleCatalog>{
+    return applyProjectAgents(await this.roles(),project?.agents,key=>{const model=this.model(key);return model?getSupportedThinkingLevels(model):undefined;});
+  }
+  /** A project may only name models that are available now, and an explicit level must suit the model it will run with. */
+  async checkProjectAgents(overrides:ProjectRoleOverride[]){
+    const models=await this.availableModels(),global=await this.roles();
+    for(const item of overrides){
+      const key=item.model!==undefined?item.model:global.roles.find(role=>role.role===item.role)?.model??null;
+      const model=key?models.find(model=>`${model.provider}/${model.id}`===key):undefined;
+      if(item.model&&!model)throw new Error("Configured model is unavailable");
+      if(item.reasoning&&model&&!getSupportedThinkingLevels(model).includes(item.reasoning))throw new Error("Reasoning level is unavailable for the configured model");
+    }
   }
   private assertRole(key:string,role:SessionRole,models:Awaited<ReturnType<ModelRuntime["getAvailable"]>>){
     const model=models.find(model=>`${model.provider}/${model.id}`===key);

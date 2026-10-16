@@ -7,7 +7,7 @@ import { createAssistantMessageEventStream, getCurrentSystemPrompt, type Assista
 import { Storage } from "./storage.js";
 import { PiHost } from "./pi-host.js";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { normalizeRoles, resolveRole, roleInput } from "./roles.js";
+import { applyProjectAgents, normalizeProjectAgents, normalizeRoles, projectAgentsInput, resolveRole, roleInput } from "./roles.js";
 import { snapshotProjectTask } from "./project-task.js";
 
 const scratch=resolve(import.meta.dirname,"../../.scratch",`roles-${Date.now()}-${process.pid}`);
@@ -112,4 +112,20 @@ test("shutdown drains held creation and restored-session loading before storage 
       if(boundary==="completion")assert.equal((await original<{status:string}>("command",{id:commandId,sessionId:id,kind:"prompt",requestHash:"fixture"})).status,"completed","Prompt completion is persisted before close returns");
     }finally{release();await admission;await closing;await host.close();await storage.close();}
   }
+});
+
+test("project agent overrides replace only the fields they set and fall back when the layers disagree on reasoning",()=>{
+  const global=normalizeRoles({revision:3,roles:[{role:"planner",model:"a/deep",reasoning:"max"},{role:"worker",model:"a/fast",reasoning:"low"},{role:"qa",model:null,reasoning:"high"}]});
+  const levels=(model:string)=>({"a/deep":["low","medium","high","max"],"a/fast":["low"],"b/tiny":["off"]} as Record<string,string[]>)[model];
+  assert.deepEqual(applyProjectAgents(global,[],levels),global,"No overrides keeps the global catalog");
+  const merged=applyProjectAgents(global,[{role:"planner",reasoning:"medium"},{role:"worker",model:"a/deep"},{role:"qa",model:"b/tiny"},{role:"reviewer",model:null,reasoning:null}],levels);
+  assert.equal(merged.revision,3);
+  assert.deepEqual(merged.roles.find(r=>r.role==="planner"),{role:"planner",model:"a/deep",reasoning:"medium"},"Reasoning only keeps the global model");
+  assert.deepEqual(merged.roles.find(r=>r.role==="worker"),{role:"worker",model:"a/deep",reasoning:"low"},"A supported global level stays with the project model");
+  assert.deepEqual(merged.roles.find(r=>r.role==="qa"),{role:"qa",model:"b/tiny",reasoning:null},"A global level the project model lacks falls back to the model default");
+  assert.deepEqual(merged.roles.find(r=>r.role==="reviewer"),{role:"reviewer",model:null,reasoning:null});
+  assert.deepEqual(merged.roles.find(r=>r.role==="researcher"),global.roles.find(r=>r.role==="researcher"));
+  assert.deepEqual(projectAgentsInput([{role:"worker"},{role:"qa",model:null}]),[{role:"qa",model:null}],"Rows that change nothing are dropped");
+  for(const bad of [null,{},[{role:"root"}],[{role:"qa",model:"x"}],[{role:"qa",reasoning:"huge"}],[{role:"qa"},{role:"qa"}],[{role:"qa",groupId:"g"}]])assert.throws(()=>projectAgentsInput(bad),`${JSON.stringify(bad)} is rejected`);
+  assert.deepEqual(normalizeProjectAgents([{role:"qa",model:"bad"},{role:"worker",reasoning:"low"},{role:"worker",reasoning:"high"},"junk"]),[{role:"worker",reasoning:"low"}],"Stored junk is ignored on read");
 });
