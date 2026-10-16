@@ -40,6 +40,7 @@ if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="archived_a
 if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="manager_id"))db.exec("ALTER TABLE sessions ADD COLUMN manager_id TEXT");
 if(!db.prepare("PRAGMA table_info(sessions)").all().some(x=>x.name==="dispatch_started"))db.exec("ALTER TABLE sessions ADD COLUMN dispatch_started INTEGER NOT NULL DEFAULT 0");
 if(!db.prepare("PRAGMA table_info(projects)").all().some(x=>x.name==="archived_at"))db.exec("ALTER TABLE projects ADD COLUMN archived_at INTEGER");
+if(!db.prepare("PRAGMA table_info(projects)").all().some(x=>x.name==="agents"))db.exec("ALTER TABLE projects ADD COLUMN agents TEXT");
 if(!db.prepare("PRAGMA table_info(browser_actions)").all().some(x=>x.name==="request_hash"))db.exec("ALTER TABLE browser_actions ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''");
 db.exec("UPDATE sessions SET status='interrupted' WHERE parent_id IS NOT NULL AND status='idle'");
 if(!db.prepare("PRAGMA table_info(commands)").all().some(x=>x.name==="request_hash"))db.exec("ALTER TABLE commands ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''");
@@ -205,7 +206,7 @@ function transition(table,{id,from,to,patch={}}){
   return result.changes?updated:undefined;
 }
 
-function projectRow({archived_at,...row}){return {...row,folders:JSON.parse(row.folders),archivedAt:archived_at??null};}
+function projectRow({archived_at,agents,...row}){return {...row,folders:JSON.parse(row.folders),archivedAt:archived_at??null,agents:agents?JSON.parse(agents):[]};}
 const queries = {
   roles: () => {const row=db.prepare("SELECT data FROM settings WHERE name='roles'").get();return row?JSON.parse(row.data):null;},
   saveRoles: ({catalog}) => {
@@ -342,7 +343,8 @@ const queries = {
   workerMergeBusy: ({id}) => !!db.prepare("SELECT 1 FROM worker_merges WHERE (root_id=? OR worker_id=?) AND status IN ('pending','running') LIMIT 1").get(id,id),
   projects: () => db.prepare("SELECT * FROM projects ORDER BY name COLLATE NOCASE,id").all().map(projectRow),
   project: ({id}) => {const row=db.prepare("SELECT * FROM projects WHERE id=?").get(id);return row?projectRow(row):undefined;},
-  saveProject: ({id,name,folders}) => db.prepare("INSERT INTO projects(id,name,folders) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folders=excluded.folders").run(id,name,JSON.stringify(folders)),
+  // agents left out keeps the project's saved agent overrides.
+  saveProject: ({id,name,folders,agents}) => db.prepare("INSERT INTO projects(id,name,folders,agents) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folders=excluded.folders,agents=COALESCE(excluded.agents,projects.agents)").run(id,name,JSON.stringify(folders),agents===undefined?null:JSON.stringify(agents)),
   archiveProject: ({id,archived}) => db.prepare("UPDATE projects SET archived_at=? WHERE id=?").run(archived?Date.now():null,id),
   deleteProject: ({id}) => db.prepare("DELETE FROM projects WHERE id=?").run(id),
   addProjectTask: row => {

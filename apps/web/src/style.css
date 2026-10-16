@@ -716,3 +716,7 @@ select.input option{background:var(--surface-2)}
 .ring-bar{stroke:var(--accent);stroke-linecap:round}
 .ring-bar.spin{transform-origin:center;animation:spin 1s linear infinite}
 .update-pct{font-size:10px;font-weight:600;color:var(--text)}
+.project-agents{border:0;padding:0;margin:0;min-width:0}
+.project-agents .role-row:first-of-type{border-top:0}
+.project-agents legend{padding:0}
+@media (max-width:600px){.project-agents .role-row{grid-template-columns:minmax(0,1fr)}}
