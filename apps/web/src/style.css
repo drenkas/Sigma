@@ -379,6 +379,21 @@ select.input option{background:var(--surface-2)}
 .permit-custom{display:flex;gap:var(--s2);align-items:center}
 .permit-custom .input{flex:1;min-width:0}
 .grant-line{margin-bottom:var(--s2)}
+/* ask_user: the agent's question with suggested answers, above the composer */
+.ask{border:1px solid var(--border-strong);background:var(--surface);border-radius:var(--r-xl);padding:var(--s3);display:flex;flex-direction:column;gap:var(--s2)}
+.ask-head{display:flex;align-items:flex-start;gap:var(--s2)}
+.ask-question{flex:1;min-width:0;font-size:14px;font-weight:600;line-height:1.45;color:var(--text);overflow-wrap:anywhere;white-space:pre-wrap;max-height:20vh;overflow:auto;padding-top:3px}
+.ask-options{display:flex;flex-direction:column;gap:var(--s1);max-height:32vh;overflow:auto;list-style:none;margin:0;padding:0}
+.ask-option{display:flex;align-items:flex-start;gap:var(--s3);width:100%;padding:var(--s2) var(--s3);border-radius:var(--r-lg);border:1px solid var(--border);background:var(--surface-2);color:var(--text);text-align:left;font-size:13px;transition:background-color .12s,border-color .12s}
+.ask-option:hover:not(:disabled){background:var(--hover);border-color:var(--border-hover)}
+.ask-option:disabled{opacity:.6}
+.ask-key{display:inline-grid;place-items:center;flex:none;width:20px;height:20px;border-radius:999px;background:var(--surface-3);color:var(--text-2);font-size:11px;font-weight:600}
+.ask-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ask-label{font-weight:550;overflow-wrap:anywhere}
+.ask-desc{color:var(--text-2);font-size:12px;overflow-wrap:anywhere}
+.ask-custom{display:flex;gap:var(--s2);align-items:center}
+.ask-custom .input{flex:1;min-width:0}
+.msg-options{margin:var(--s2) 0 0;padding:0 0 0 calc(28px + var(--s4));font-size:13px;color:var(--text-2)}
 .recovery-strip{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s3);padding:var(--s2) var(--s3);border:1px solid var(--unk-border);background:var(--unk-bg);border-radius:var(--r-lg);font-size:13px;color:var(--unk-text)}
 .composer{position:relative;border:1px solid var(--border-strong);background:var(--surface-2);border-radius:var(--r-xl);box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
 .composer:focus-within{border-color:var(--border-hover)}

@@ -35,7 +35,7 @@ type WriteObservation = {id:string;sessionId:string;path:string;beforeHash:strin
 const RUN:Record<string,{label:string;hint:string}>={
   idle:{label:"Idle",hint:"No Pi run in progress."},
   running:{label:"Running",hint:"A Pi run is in progress."},
-  waiting:{label:"Waiting",hint:"The agent is waiting for you to answer an approval request."},
+  waiting:{label:"Waiting",hint:"The agent is waiting for you to answer an approval request or its question."},
   settled:{label:"Settled",hint:"The Pi run ended. This is not proof that the engineering task succeeded."},
   interrupted:{label:"Interrupted",hint:"Stopped by you or by a service restart."},
   error:{label:"Error",hint:"The Pi run ended with an error."},
@@ -480,9 +480,9 @@ function App(){
       if(task)await selectTask(task);else throw new Error("Task was created but its snapshot is unavailable. Refresh the task list before continuing.");
     }catch(e){fail(e);void refreshTasks().catch(()=>{});void refreshWorkspaceRecovery().catch(()=>{});}finally{setTaskBusy(false);}
   }
-  async function send(){const text=prompt().trim(),images=attachments(),s=current();if(!s||!text&&!images.length||images.length&&!imagesAllowed()||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),print=fingerprint(images),reuse=saved?.text===text&&(saved.images??"")===print,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior,...(print?{images:print}:{})}));try{const result=await api<{accepted:boolean;status:string;receipt?:string;mode?:"chrome"|"internal"}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior,...(images.length?{images:images.map(({mimeType,data})=>({mimeType,data}))}:{})},id);if(text==="/browser internal"||text==="/browser chrome"){
+  async function send(answer?:string){const text=answer?.trim()??prompt().trim(),images=answer===undefined?attachments():[],s=current();if(!s||!text&&!images.length||images.length&&!imagesAllowed()||taskUnresolved())return;setBusy(true);setNotice(null);const key=`pi-prompt-${s.id}`,saved=JSON.parse(sessionStorage.getItem(key)||"null"),print=fingerprint(images),reuse=saved?.text===text&&(saved.images??"")===print,id=reuse?saved.id:crypto.randomUUID(),behavior=reuse?saved.behavior:s.status==="running"?"followUp":undefined;sessionStorage.setItem(key,JSON.stringify({id,text,behavior,...(print?{images:print}:{})}));try{const result=await api<{accepted:boolean;status:string;receipt?:string;mode?:"chrome"|"internal"}>(`/sessions/${s.id}/prompt`,"POST",{text,behavior,...(images.length?{images:images.map(({mimeType,data})=>({mimeType,data}))}:{})},id);if(text==="/browser internal"||text==="/browser chrome"){
       sessionStorage.removeItem(key);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");resize();setNotice({kind:result.status==="completed"?"info":"warning",text:result.receipt??(result.status==="completed"?`Browser mode changed to ${result.mode}.`:`Browser mode command is ${result.status}; inspect Browser control before trying again.`)});void refresh().catch(()=>{});return;
-    }if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);prompts.delete(s.id);attachmentDrafts.delete(s.id);if(current()?.id!==s.id){void refresh().catch(()=>{});return;}setPrompt("");setAttachments(x=>x.filter(a=>!images.includes(a)));resize();await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
+    }if(result.status==="unknown"||result.status==="accepted")throw new Error("Previous prompt outcome is uncertain. Inspect Pi session history before retrying.");if(result.status==="rejected"){sessionStorage.removeItem(key);throw new Error("Pi rejected the prompt. Check model authentication and retry.");}if(!["dispatched","queued","completed"].includes(result.status))throw new Error("Unexpected prompt state; inspect Pi session history before retrying.");sessionStorage.removeItem(key);if(answer===undefined){prompts.delete(s.id);attachmentDrafts.delete(s.id);}if(current()?.id!==s.id){void refresh().catch(()=>{});return;}if(answer===undefined){setPrompt("");setAttachments(x=>x.filter(a=>!images.includes(a)));resize();}else setAskText("");await resync(s.id);if(result.status==="queued"&&current()?.id===s.id)setQueued(q=>({id:s.id,count:(q?.id===s.id?q.count:0)+1}));void refresh().catch(()=>{});}catch(e){if((e as {status?:number}).status===409)sessionStorage.removeItem(key);fail(e);}finally{setBusy(false);}}
   async function stop(){const s=current();if(!s)return;try{await api(`/sessions/${s.id}/abort`,"POST",{});}catch(e){fail(e);}}
   async function stopChild(agent:AgentView){
     const s=current();if(!s||offline()||stoppingChildren().includes(agent.id))return;
@@ -717,7 +717,7 @@ function App(){
     <span class="session-title">{p.task.projectName} · multi-repo</span><span class="tag session-demo">{taskState(p.task.status)}</span>
     <span class="session-meta"><span>{p.task.repositories.length} repositories</span><span class="dot-sep" aria-hidden="true">·</span><span class="nowrap">{ago(p.task.createdAt)}</span></span>
   </button>;
-  const rowStatus=(s:Listed)=>{const open=current()?.id===s.id,status=open?current()!.status:s.status;return status==="running"&&(open?pending().length>0:!!s.waiting)?"waiting":status;};
+  const rowStatus=(s:Listed)=>{const open=current()?.id===s.id,status=open?current()!.status:s.status;return (open?status==="running"&&pending().length>0||!!latestQuestion():!!s.waiting)?"waiting":status;};
   const SessionRow=(p:{s:Listed;archived?:boolean})=><div class="session-row">
     <button class="session" classList={{active:!showProjects()&&current()?.id===p.s.id,loading:loadingId()===p.s.id}} aria-current={!showProjects()&&current()?.id===p.s.id?"page":undefined} onClick={()=>select(p.s.id)}>
       <span class="session-title">{sessionTitle(p.s)}</span>
@@ -792,11 +792,13 @@ function App(){
     <Show when={p.child&&!p.agent.revisionReviewer&&profile().maxDepth>0&&(p.agent.status==="idle"||p.agent.status==="running")}><button type="button" class="btn danger-ghost sm" disabled={offline()||stoppingChildren().includes(p.agent.id)} onClick={()=>stopChild(p.agent)} aria-label={`Stop ${p.agent.role} ${short(p.agent.id)}`}><Icon name="stop"/>{stoppingChildren().includes(p.agent.id)?"Stopping…":"Stop child"}</button></Show>
   </li>;
   const AgentBranch=(p:{agent:AgentView})=><><AgentRow agent={p.agent} child/><Show when={children().some(agent=>agent.parentId===p.agent.id)}><li class="tree-children"><ul><For each={children().filter(agent=>agent.parentId===p.agent.id)}>{agent=><AgentBranch agent={agent}/>}</For></ul></li></Show></>;
+  // Without a session only the Repository tab has content: the selected folder's Git status and actions.
+  const shownTab=():DetailTab=>current()?detailTab():"repository";
   const DETAIL_TABS:{id:DetailTab;label:string}[]=[{id:"overview",label:"Overview"},{id:"changes",label:"Changes"},{id:"repository",label:"Repository"},{id:"activity",label:"Activity"},{id:"graph",label:"Graph"}];
   const tabCount=(id:DetailTab)=>!current()?0:id==="overview"?current()!.recoveryInputs.length+current()!.recoveryActions.length+childTrouble().filter(a=>a.status==="error").length:id==="changes"?pending().length+mergePending()+directNeeds():0;
   function tabKeys(e:KeyboardEvent){
     if(!["ArrowLeft","ArrowRight","Home","End"].includes(e.key))return;e.preventDefault();
-    const i=DETAIL_TABS.findIndex(t=>t.id===detailTab()),n=DETAIL_TABS.length;
+    if(!current())return;const i=DETAIL_TABS.findIndex(t=>t.id===detailTab()),n=DETAIL_TABS.length;
     const next=e.key==="Home"?0:e.key==="End"?n-1:(i+(e.key==="ArrowRight"?1:n-1))%n;
     setDetailTab(DETAIL_TABS[next].id);document.getElementById(`tab-${DETAIL_TABS[next].id}`)?.focus();
   }
@@ -805,7 +807,7 @@ function App(){
     <div class="col-head details-head">
       <h2 ref={detailsTitle} class="sr-only" tabindex="-1">Session details</h2>
       <div class="tabs" role="tablist" aria-label="Session details" onKeyDown={tabKeys}>
-        <For each={DETAIL_TABS}>{t=><button id={`tab-${t.id}`} role="tab" class="tab" aria-selected={detailTab()===t.id} aria-controls={`panel-${t.id}`} tabindex={detailTab()===t.id?0:-1} disabled={!current()} onClick={()=>setDetailTab(t.id)}>
+        <For each={DETAIL_TABS}>{t=><button id={`tab-${t.id}`} role="tab" class="tab" aria-selected={shownTab()===t.id} aria-controls={`panel-${t.id}`} tabindex={shownTab()===t.id?0:-1} disabled={!current()&&t.id!=="repository"} onClick={()=>setDetailTab(t.id)}>
           {t.label}<Show when={tabCount(t.id)}><span class="pip">{tabCount(t.id)}</span></Show>
         </button>}</For>
       </div>
@@ -813,7 +815,11 @@ function App(){
       <button class="icon-btn drawer-close only-details" onClick={()=>closeDetails()} aria-label="Close session details"><Icon name="close"/></button>
     </div>
     <div class="details-body">
-      <Show when={current()} fallback={<p class="muted pad">Start or open a session to see its changes, repository, agents and tool activity.</p>}>
+      <Show when={current()} fallback={<Show when={workspace()} fallback={<p class="muted pad">Start or open a session to see its changes, agents and tool activity. Choose a folder to see its repository.</p>}>
+        <div id="panel-repository" role="tabpanel" aria-labelledby="tab-repository" class="tab-panel">
+          <Repository id={`folder:${workspace()}`} folder={workspace()} revision={workspace()} kind={null} running={busy()} offline={offline()} onCommit={()=>{}} active={panelShown()}/>
+        </div>
+      </Show>}>
         <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" class="tab-panel" hidden={detailTab()!=="overview"}>
           <section class="panel" aria-labelledby="h-summary">
             <h3 id="h-summary" class="panel-title">Summary</h3>
@@ -929,6 +935,11 @@ function App(){
   ];
   const workLive=()=>current()?.status==="running"&&(!graphNode()||graphNode()!.id===current()?.id);
   const [openWork,setOpenWork]=createSignal<Record<string,boolean>>({});
+  // The agent's open ask_user question: the latest visible reply carries it and the run has settled. Hidden ones stay hidden for that reply only.
+  const [askText,setAskText]=createSignal(""),[askHidden,setAskHidden]=createSignal<string|null>(null);
+  const latestQuestion=createMemo(()=>{const s=current();if(!s||running())return;const last=[...s.messages].reverse().find(m=>!m.interim);if(last?.role!=="assistant"||!last.question)return;return {key:`${s.id}:${last.id}`,...last.question};});
+  const openQuestion=createMemo(()=>{const q=latestQuestion(),s=current();return !q||graphNode()&&graphNode()!.id!==s?.id||askHidden()===q.key?undefined:q;});
+  function answerQuestion(text:string){if(!text.trim()||busy()||taskUnresolved())return;void send(text);}
   const lastUserId=createMemo(()=>[...(conversation()?.messages??[])].reverse().find(m=>m.role==="user")?.id);
   // Steps of earlier turns are not in the snapshot (stepCount only); they load when the block is expanded.
   const [loadedSteps,setLoadedSteps]=createSignal<Record<string,WorkStep[]|"loading"|"failed">>({});
@@ -1056,6 +1067,7 @@ function App(){
           <For each={graphNode()&&graphNode()!.id!==current()?.id&&!graphHistory()?[]:conversation()!.messages.slice(-shown())}>{m=><Show when={!m.interim}><article class={`msg ${m.role==="user"?"user":"assistant"}`}>
             <div class="msg-author" classList={{"sr-only":m.role==="user"}}>{m.role==="user"?"You":<><Logo class="avatar"/>Sigma<span class="muted">{graphNode()?.role??"root"} agent</span></>}</div>
             <Show when={m.text||!m.images}>{m.role==="user"?<div class="msg-body">{renderMentions(m.text)}</div>:<Markdown class="msg-body md" text={m.text}/>}</Show>
+            <Show when={m.question&&openQuestion()?.key!==`${conversation()!.id}:${m.id}`}><ul class="msg-options" aria-label="Suggested answers"><For each={m.question!.options}>{o=><li>{o.label}<Show when={o.description}><span class="muted"> · {o.description}</span></Show></li>}</For></ul></Show>
             <Show when={m.images}><SentImages session={conversation()!.id} message={m.id} count={m.images!}/></Show>
           </article><Show when={m.role==="user"&&(m.work||workLive()&&m.id===lastUserId())}><WorkBlock id={m.id} work={m.work} at={m.at} live={workLive()&&m.id===lastUserId()}/></Show></Show>}</For>
           <Show when={draft()&&(!graphNode()||graphNode()!.id===current()?.id)}><article class="msg assistant streaming" aria-busy="true"><div class="msg-author"><Logo class="avatar"/>Sigma<span class="muted">root agent</span><span class="live-tag">streaming</span></div><div class="msg-body md"><Markdown text={draft()}/><span class="caret" aria-hidden="true"/></div></article></Show>
@@ -1096,6 +1108,15 @@ function App(){
           <div class="recovery-strip" role="status"><span class="badge st-unknown"><span class="glyph" aria-hidden="true"/>Unknown</span><span>{current()!.recoveryInputs.length+current()!.recoveryActions.length} action{current()!.recoveryInputs.length+current()!.recoveryActions.length===1?" has an":"s have an"} unknown outcome. Nothing was replayed.</span><button class="link-btn" onClick={()=>openDetails("recovery")}>Review</button></div>
         </Show>
         <Show when={directNeeds()}><div class="recovery-strip" role="status"><span class="badge st-unknown"><span class="glyph" aria-hidden="true"/>Unknown</span><span>{directNeeds()} direct write{directNeeds()===1?" needs":"s need"} observed-state reconciliation.</span><button class="link-btn" onClick={()=>openDetails("writes")}>Review observed state</button></div></Show>
+        <Show when={openQuestion()} keyed>{q=><section class="ask" aria-labelledby="h-ask">
+          <div class="ask-head"><h2 id="h-ask" class="ask-question">{q.question}</h2><button type="button" class="icon-btn sm" onClick={()=>{setAskHidden(q.key);queueMicrotask(()=>composer?.focus());}} aria-label="Hide the question"><Icon name="close"/></button></div>
+          <ol class="ask-options"><For each={q.options}>{(o,i)=><li><button type="button" class="ask-option" disabled={busy()||offline()||taskUnresolved()} onClick={()=>answerQuestion(o.label)}><span class="ask-key" aria-hidden="true">{i()+1}</span><span class="ask-text"><span class="ask-label">{o.label}</span><Show when={o.description}><span class="ask-desc">{o.description}</span></Show></span></button></li>}</For></ol>
+          <form class="ask-custom" onSubmit={e=>{e.preventDefault();answerQuestion(askText());}}>
+            <label for="ask-own" class="sr-only">Your own answer</label>
+            <input id="ask-own" class="input" value={askText()} onInput={e=>setAskText(e.currentTarget.value)} disabled={busy()||taskUnresolved()} placeholder="Or write your own answer…" autocomplete="off"/>
+            <button type="submit" class="btn primary sm" disabled={!askText().trim()||busy()||offline()||taskUnresolved()}>Answer</button>
+          </form>
+        </section>}</Show>
         <form class="composer" classList={{running:running(),dragging:dragging()}} onSubmit={e=>{e.preventDefault();void send();}} {...dropTarget}>
           <AttachmentStrip/>
           <label for="prompt" class="sr-only">{running()?"Queue a follow-up message":"Message to the root agent"}</label>

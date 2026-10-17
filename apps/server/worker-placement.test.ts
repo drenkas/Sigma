@@ -80,9 +80,16 @@ test("with Ask mode the parallel worker's changes stay in its worktree for a man
     assert.equal(await exists(join(isolated.cwd,isolatedFile)),true);
     assert.deepEqual(await f.storage.call("workerMerges",{rootId:id}),[]);
     const results=await delegateResults(f,id);assert.ok(results.some(text=>/pending merge in Changes/.test(text)));
+    // Git works in the Parallel code session, but HEAD cannot move while the worktree worker is unmerged: its merge needs the shared base commit.
+    execFileSync("git",["-C",f.source,"branch","feature"]);
+    assert.deepEqual(await f.host.gitInfo(id),{enabled:true,commit:true,branches:["feature","main"]});
+    await assert.rejects(f.host.gitAction(id,"switch",{branch:"feature"},crypto.randomUUID()),/not merged into this folder yet/);
+    assert.equal(execFileSync("git",["-C",f.source,"branch","--show-current"],{encoding:"utf8"}).trim(),"main");
     // The user can still merge it manually afterwards.
     const preview=await f.merge.prepare(id,isolated.id,crypto.randomUUID());assert.equal(preview.status,"pending");
     assert.equal((await f.merge.decide(id,preview.id,true)).status,"applied");assert.equal(await exists(join(f.source,isolatedFile)),true);
+    await f.host.gitAction(id,"switch",{branch:"feature"},crypto.randomUUID());
+    assert.equal(execFileSync("git",["-C",f.source,"branch","--show-current"],{encoding:"utf8"}).trim(),"feature");
   }finally{await f.close();}
 });
 

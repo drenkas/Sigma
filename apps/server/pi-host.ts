@@ -19,6 +19,7 @@ import { formatShellResult, killAllShells, protectedRoots, runShell, sandboxAvai
 import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch } from "./git-actions.js";
 import { prepareCommit, executeCommit, gitIdentity, dispatchGit, inspectGit, finalizeGit, type GitIntent } from "./git-intents.js";
 import { stripMentionContext, type MentionTool } from "./mentions.js";
+import { ASK_USER_TOOL, askQuestion, askUserTool } from "./ask-user.js";
 import { defaultRoles, normalizeRoles, roleInput, resolveRole } from "./roles.js";
 import { NativeCli, NATIVE_PROVIDER_IDS, AGY_UNSUPERVISED_PROVIDER_ID, CLAUDE_PROVIDER_ID } from "./native-cli.js";
 import { registerAgyUnsupervisedProvider } from "./agy-provider.js";
@@ -40,10 +41,11 @@ function toolDetail(cwd:string,tool:string,args:any):string|undefined{
   if(tool==="bash"&&typeof args.command==="string")return clip(args.command);
   if(tool==="git_commit"&&typeof args.message==="string")return clip(args.message.split("\n")[0]);
   if(tool==="delegate"&&typeof args.role==="string")return clip(args.role);
+  if(tool===ASK_USER_TOOL&&typeof args.question==="string")return clip(args.question);
 }
 const DEFAULT_REASONING:RoleReasoning="medium"; // Pi's DEFAULT_THINKING_LEVEL when no level is requested
 type RecordRow = { id:string; cwd:string; file:string; managerId:string|null; dispatchStarted?:boolean; archivedAt?:number|null; model:string; policy:SessionPolicy|null; status:SessionView["status"]; parentId:string|null; role:string; rootId?:string; ancestors?:string[] };
-const ORCHESTRATOR_PROMPT=`You are the orchestrator. Before starting any work, classify the task against the criteria below, then choose the agents with the delegate tool. If the user states the mode or size in their message, follow it without asking. If the criteria do not clearly determine the size, do NOT guess and do not start work. The size is unclear when: the request is vague or open-ended (e.g. 'improve', 'clean up', 'make it better', 'refactor this project') without naming specific files, behaviour or an expected outcome; the scope could reasonably be read as either a small fix or a broad change; or the task sits on the border of two sizes. In those cases ask before doing anything, including before delegating to a planner or researcher. To ask: ask the user one short question that names the two candidate sizes and what each would mean, then wait for the answer. For example: "This looks between medium and complex: medium = I implement via a worker and get it reviewed; complex = a planner first, then worker, reviewer. Which do you prefer?" Asking one extra question is better than guessing.
+const ORCHESTRATOR_PROMPT=`You are the orchestrator. Before starting any work, classify the task against the criteria below, then choose the agents with the delegate tool. If the user states the mode or size in their message, follow it without asking. If the criteria do not clearly determine the size, do NOT guess and do not start work. The size is unclear when: the request is vague or open-ended (e.g. 'improve', 'clean up', 'make it better', 'refactor this project') without naming specific files, behaviour or an expected outcome; the scope could reasonably be read as either a small fix or a broad change; or the task sits on the border of two sizes. In those cases ask before doing anything, including before delegating to a planner or researcher. To ask: call the ask_user tool with one short question and the two candidate sizes as options, each option saying what that size would mean, then wait for the answer. For example: question "This looks between medium and complex. Which do you prefer?", options "Medium" (I implement via a worker and get it reviewed) and "Complex" (a planner first, then worker, reviewer). Asking one extra question is better than guessing.
 
 Small: do it yourself and delegate nothing. Use this when ALL of these hold:
 - It is a question, an explanation or a lookup, or it needs only reading code to answer.
@@ -146,13 +148,16 @@ export function visibleMessages(session:AgentSession,cwd:string):SessionView["me
     if(message.role!=="assistant"&&message.role!=="toolResult")return;
     if(turn)turn.endedAt=Math.max(turn.endedAt,at??0,saved.get(message)??0);
     if(message.role==="toolResult")return;
-    const parts:any[]=Array.isArray(message.content)?message.content:[],text=parts.filter(part=>part.type==="text").map(part=>part.text).join(""),calls=parts.filter(part=>part.type==="toolCall"),interim=!!text&&calls.length>0;
+    const parts:any[]=Array.isArray(message.content)?message.content:[],text=parts.filter(part=>part.type==="text").map(part=>part.text).join(""),calls=parts.filter(part=>part.type==="toolCall");
+    // A delivered ask_user call makes this message the visible reply that carries the question; a blocked or failed call shows nothing extra.
+    const askCall=calls.find(call=>call.name===ASK_USER_TOOL&&results.get(call.id)===false),question=askCall?askQuestion(askCall.arguments):undefined,interim=!question&&!!text&&calls.length>0;
     if(turn)for(const part of parts){
       if(part.type==="thinking"&&!part.redacted){const t=String(part.thinking??"").trim().slice(0,8000);if(t)turn.steps.push({kind:"thinking",text:t});}
       else if(part.type==="text"&&interim){const t=String(part.text).trim();if(t)turn.steps.push({kind:"note",text:t});}
       else if(part.type==="toolCall"){const detail=toolDetail(cwd,part.name,part.arguments),failed=results.get(part.id);turn.steps.push({kind:"tool",tool:part.name,...(detail?{detail}:{}),status:failed===undefined?"running":failed?"error":"done"});}
     }
-    if(text)out.push({id:String(index),role:"assistant",text,...(at!==undefined?{at}:{}),...(interim?{interim:true as const}:{})});
+    if(question)out.push({id:String(index),role:"assistant",text:text.trim()?`${text.trim()}\n\n${question.question}`:question.question,...(at!==undefined?{at}:{}),question});
+    else if(text)out.push({id:String(index),role:"assistant",text,...(at!==undefined?{at}:{}),...(interim?{interim:true as const}:{})});
   });
   close();return out;
 }
@@ -396,6 +401,8 @@ export class PiHost {
     const profile=row.policy?.effective.profile??READ_ONLY_PROFILE;
     // Shell access: root sessions that can write, and every delegated agent. Never the unsupervised AGY route, multi-repo coordinators (no tools) or the independent revision reviewer.
     const bashEnabled=!unsupervised&&!qaReviewer&&profile.tools.length>0&&(!!row.parentId||(profile.tools as readonly string[]).includes("write"));
+    // Root agents may ask the user a question with suggested answers; delegated agents report back to their parent instead.
+    const askEnabled=!row.parentId&&!unsupervised&&!qaReviewer;
     const browserToolsEnabled=!!this.browserUse&&row.id===context.root.id&&row.role==="root"&&!row.parentId&&!unsupervised&&profile.tools.length>0;
     const task=row.policy?.requested.mode==="multi"&&row.policy.task?await this.storage.call<ProjectTaskView|undefined>("projectTask",{id:row.policy.task.id}):undefined;
     const settings=SettingsManager.inMemory();
@@ -410,6 +417,7 @@ export class PiHost {
         },(id,outcome)=>this.writeOutcome(row,id,outcome),()=>this.isStopping(row),toolCallId=>applied.add(toolCallId),async(path,approvalId)=>{await this.assertDirectReady(row,true,approvalId);await assertWorkspaceHead(row.cwd,row.policy!.workspace!);if(row.policy!.workspace!.kind==="direct")assertNotIgnored(row.cwd,path);},path=>this.protectPath(resolve(row.cwd,path))))pi.registerTool({...tool,execute:(toolCallId,params,signal,onUpdate,ctx)=>this.journalTool(row,toolCallId,tool.name as "edit"|"write",params,()=>tool.execute(toolCallId,params,signal,onUpdate,ctx),{},()=>applied.has(toolCallId)?"unknown":"rejected",()=>applied.delete(toolCallId))});
       }
       if(bashEnabled)pi.registerTool(this.bashTool(row));
+      if(askEnabled)pi.registerTool(askUserTool());
       if(qaEnabled)for(const tool of qaTools(this.qa!,{rootId:context.root.id,agentId:row.id,approve:async preview=>!!await this.requestApproval(row,"qa_action",preview)}))pi.registerTool(tool);
       if(qaReviewer)for(const tool of qaReviewTools(this.qa!,{rootId:context.root.id,reviewId:row.id,images:!!this.model(row.model)?.input?.includes("image")}))pi.registerTool(tool);
       if(browserToolsEnabled&&this.browserUse)for(const tool of this.browserUse.tools(row.id,()=>!!this.model(row.model)?.input?.includes("image"),async preview=>!!await this.requestApproval(row,"browser_action",preview)))pi.registerTool(tool);
@@ -515,6 +523,7 @@ export class PiHost {
         if(task&&!row.parentId&&(event.toolName==="delegate_repo"||event.toolName==="repo_status"))return;
         if(event.toolName==="git_commit"&&this.commitTool(row))return;
         if(event.toolName==="bash"&&bashEnabled)return;
+        if(event.toolName===ASK_USER_TOOL&&askEnabled)return;
         if(isQaTool(event.toolName)){
           if(qaEnabled&&this.qa&&await this.qa.hasApprovedRun(context.root.id))return;
           return {block:true,reason:"QA tools require a QA session with a user-approved running QA run"};
@@ -543,6 +552,7 @@ export class PiHost {
     const toolNames=task?[...profile.tools,"delegate_repo","repo_status"]:canDelegate?[...profile.tools,"delegate"]:[...profile.tools];
     if(this.commitTool(row))toolNames.push("git_commit");
     if(bashEnabled)toolNames.push("bash");
+    if(askEnabled)toolNames.push(ASK_USER_TOOL);
     if(browserToolsEnabled)toolNames.push(...BROWSER_TOOLS);
     if(qaEnabled)toolNames.push(...QA_TOOLS);
     if(qaReviewer)toolNames.push(...QA_REVIEW_TOOLS);
@@ -651,29 +661,62 @@ export class PiHost {
     finally{cleanup();}
   }
   // ---------- Git actions on the selected folder ----------
-  private commitTool(row:RecordRow){return !row.parentId&&row.policy?.workspace?.kind==="direct"&&row.policy.requested.mode==="code"&&!row.policy.task;}
+  private commitTool(row:RecordRow){return !row.parentId&&row.policy?.workspace?.kind==="direct"&&(row.policy.requested.mode==="code"||row.policy.requested.mode==="parallel")&&!row.policy.task;}
   private async gitTarget(id:string){
     const row=await this.storage.call<RecordRow|undefined>("session",{id});
     if(!row||row.parentId)throw new Error("Session unavailable");
     if(row.archivedAt||row.policy?.task&& (await this.storage.call<ProjectTaskView|undefined>("projectTask",{id:row.policy.task.id}))?.archivedAt)throw new Error("Archived session or task cannot run Git actions");
     if(row.policy?.task)throw new Error("Git actions are not available for multi-repository tasks");
-    if(row.policy?.requested.mode==="parallel")throw new Error("Git actions are not available in Parallel code sessions");
     if(row.policy?.workspace&&row.policy.workspace.kind!=="direct")throw new Error("This session edits an isolated workspace; use Source Apply, then manage Git from a session on the selected folder");
     if(await realpath(row.cwd)!==row.cwd)throw new Error("Saved Git folder identity changed; create a new session on the canonical root");
     return row;
   }
-  async gitInfo(id:string){
+  /** Git on a selected folder without a session (an empty chat). Commit needs an agent to write the message, so only switch, pull and push run here. */
+  private async folderTarget(path:unknown):Promise<RecordRow>{
+    if(typeof path!=="string"||!path.startsWith("/"))throw new Error("Choose a folder");
+    const cwd=await realpath(path);if(cwd!==path)throw new Error("Use the folder's canonical path");
+    const rel=relative(await realpath(this.dataDir),cwd);if(rel===""||!rel.startsWith("..")&&!rel.startsWith("/"))throw new Error("Sigma's data folder has no Git actions");
+    return {id:`folder:${cwd}`,cwd,file:"",managerId:null,model:"",policy:null,status:"idle",parentId:null,role:"root"};
+  }
+  private async gitInfoFor(target:()=>Promise<RecordRow>){
     let row:RecordRow;
-    try{row=await this.gitTarget(id);await gitIdentity(row.cwd);}catch(error){return {enabled:false,reason:error instanceof Error?error.message:"Unavailable",commit:false,branches:[] as string[]};}
+    try{row=await target();await gitIdentity(row.cwd);}catch(error){return {enabled:false,reason:error instanceof Error?error.message:"Unavailable",commit:false,branches:[] as string[]};}
     const branches=await gitBranches(row.cwd).catch(()=>[] as string[]);
     return {enabled:true,commit:this.commitTool(row),branches};
   }
-  private async gitBarrier(row:RecordRow,commandId:string){
+  gitInfo(id:string){return this.gitInfoFor(()=>this.gitTarget(id));}
+  folderGitInfo(path:unknown){return this.gitInfoFor(()=>this.folderTarget(path));}
+  private async gitBarrier(row:RecordRow,commandId:string,movesHead=true){
     if(await this.storage.call<boolean>("gitBlocked",{cwd:row.cwd,exceptId:commandId}))throw new Error("Repository has an unknown Git outcome; inspect it before continuing");
     const rows=(await this.storage.call<Array<{id:string;cwd:string;status:string}>>("sessions")).filter(item=>item.cwd===row.cwd&&item.id!==row.id);
     if(rows.some(item=>item.status==="running"))throw new Error("Another session in this folder is running; stop it first");
-    const ids=new Set([row.id,...rows.map(item=>item.id)]);if([...this.pending.values()].some(item=>ids.has(item.sessionId)))throw new Error("A session in this folder is waiting for an approval");
+    // Delegated agents (a Parallel code root's workers) are not listed as sessions, so their runs and approvals are checked through each root.
+    const agents=(await Promise.all([row,...rows].map(item=>this.storage.call<Array<{id:string;status:string}>>("agents",{rootId:item.id})))).flat().filter(item=>item.id!==row.id);
+    if(agents.some(item=>item.status==="running"))throw new Error("An agent in this folder is running; stop it first");
+    const ids=new Set([row.id,...rows.map(item=>item.id),...agents.map(item=>item.id)]);if([...this.pending.values()].some(item=>ids.has(item.sessionId)))throw new Error("A session in this folder is waiting for an approval");
     if(await this.storage.call<boolean>("unresolvedDirectWrite",{cwd:row.cwd,includeMerges:true}))throw new Error("This folder has unresolved writes or merges; inspect them first");
+    if(movesHead&&await this.unmergedWorker(row,rows.map(item=>item.id)))throw new Error("A parallel worker's changes are not merged into this folder yet; merge or decline them in Changes → Worker changes and merges first");
+  }
+  /** A worker that ran in its own worktree can only be merged while the root stays on the commit both started from, so moving HEAD would strand its changes. Declined merges and conflicts were already shown to the user and do not block. */
+  private async unmergedWorker(row:RecordRow,others:string[]){
+    for(const root of [row,...await Promise.all(others.map(id=>this.storage.call<RecordRow|undefined>("session",{id})))])if(root&&await this.strandsWorker(root))return true;
+    return false;
+  }
+  private async strandsWorker(root:RecordRow){
+    if(root.policy?.requested.mode!=="parallel"||root.policy.workspace?.kind!=="direct")return false;
+    const merges=await this.storage.call<Array<{workerId:string;status:string}>>("workerMerges",{rootId:root.id});
+    for(const agent of await this.storage.call<Array<{id:string;parentId:string|null;role:string}>>("agents",{rootId:root.id})){
+      if(agent.parentId!==root.id||agent.role!=="worker")continue;
+      const worker=await this.storage.call<RecordRow|undefined>("session",{id:agent.id}),workspace=worker?.policy?.workspace;
+      if(!worker||!workspace||workspace.kind==="direct"||workspace.baseCommit!==root.policy.workspace.baseCommit)continue;
+      const latest=merges.find(merge=>merge.workerId===worker.id)?.status;
+      if(latest==="denied"||latest==="conflict")continue;
+      const changes=await workspaceChanges(worker.cwd,workspace).catch(()=>null);
+      if(!changes)return true;
+      const same=(path:string)=>{try{return inspectCodePath(root.cwd,path).hash===inspectCodePath(worker.cwd,path).hash;}catch{return false;}};
+      if(changes.omitted||!changes.files.every(same))return true;
+    }
+    return false;
   }
   private async syncGit(cwd:string,from:string,to:string){
     for(const {row} of this.active.values())if(row.cwd===cwd&&row.policy?.workspace?.kind==="direct"&&row.policy.workspace.baseCommit===from)row.policy={...row.policy,workspace:{...row.policy.workspace,baseCommit:to}};
@@ -690,7 +733,7 @@ export class PiHost {
       let intent:GitIntent|undefined=initial,completed=false;
       const save=(value:GitIntent)=>this.storage.call<void>("gitSave",{id,intent:value});
       try{
-        admission.check();await this.gitBarrier(row,id);admission.check();
+        admission.check();await this.gitBarrier(row,id,kind!=="push");admission.check();
         intent=initial;
         if(kind==="commit"){
           await assertWorkspaceHead(row.cwd,row.policy!.workspace!);
@@ -711,9 +754,11 @@ export class PiHost {
       }
     }).finally(()=>this.gitReservations.delete(row.cwd));
   }
-  async gitAction(id:string,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){
+  gitAction(id:string,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(id,()=>this.gitTarget(id),action,body,commandId);}
+  folderGitAction(path:unknown,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(`folder:${path}`,()=>this.folderTarget(path),action,body,commandId);}
+  private async runGitAction(id:string,target:()=>Promise<RecordRow>,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){
     return this.withPromptAdmission(id,async owner=>{
-    const row=await this.gitTarget(id);owner.check();if(row.status==="running")throw new Error("Wait for the run to finish");
+    const row=await target();owner.check();if(row.status==="running")throw new Error("Wait for the run to finish");
     if(!commandId||commandId.length>200)throw new Error("X-Command-Id required for Git actions");
     return this.gitOperation(row,commandId,action,action==="switch"?{branch:body.branch}:{},async(intent,save,admission)=>{
       if((action==="pull"||action==="push")&&intent.identity.ref==="HEAD")throw new Error("HEAD is detached; switch to a branch first");
@@ -724,14 +769,18 @@ export class PiHost {
     });
     });
   }
-  async gitRecovery(id:string){const row=await this.gitTarget(id),cwd=await realpath(row.cwd);return Promise.all((await this.storage.call<GitIntent[]>("gitRecoveries",{cwd})).map(inspectGit));}
-  async reconcileGit(id:string,commandId:string,expected:{acknowledge?:boolean;digest?:string}){
-    const row=await this.gitTarget(id);if(this.gitReservations.has(row.cwd))throw new Error("Repository Git finalization is active");this.gitReservations.add(row.cwd);
+  gitRecovery(id:string){return this.gitRecoveryFor(()=>this.gitTarget(id));}
+  folderGitRecovery(path:unknown){return this.gitRecoveryFor(()=>this.folderTarget(path));}
+  private async gitRecoveryFor(target:()=>Promise<RecordRow>){const row=await target(),cwd=await realpath(row.cwd);return Promise.all((await this.storage.call<GitIntent[]>("gitRecoveries",{cwd})).map(inspectGit));}
+  reconcileGit(id:string,commandId:string,expected:{acknowledge?:boolean;digest?:string}){return this.reconcileGitFor(id,()=>this.gitTarget(id),commandId,expected);}
+  folderReconcileGit(path:unknown,commandId:string,expected:{acknowledge?:boolean;digest?:string}){return this.reconcileGitFor(`folder:${path}`,()=>this.folderTarget(path),commandId,expected);}
+  private async reconcileGitFor(id:string,target:()=>Promise<RecordRow>,commandId:string,expected:{acknowledge?:boolean;digest?:string}){
+    const row=await target();if(this.gitReservations.has(row.cwd))throw new Error("Repository Git finalization is active");this.gitReservations.add(row.cwd);
     return this.withPromptAdmission(id,async admission=>{
       const intent=await this.storage.call<GitIntent&{status:string}>("gitGet",{id:commandId});if(!intent||intent.status!=="unknown"||intent.identity.cwd!==await realpath(row.cwd))throw new Error("Git command is not awaiting reconciliation");
-      if(row.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(row,commandId);admission.check();
+      if(row.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(row,commandId,false);admission.check();
       const view=await inspectGit(intent);if(!view.canReconcile||expected?.acknowledge!==true||view.digest!==expected.digest)throw new Error(view.reason??"Git observations changed; inspect again before acknowledgement");
-      admission.check();const current=await this.gitTarget(id);if(current.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(current,commandId);const fresh=await inspectGit(intent);if(fresh.digest!==view.digest||!fresh.canReconcile)throw new Error("Git observations changed during acknowledgement; inspect again");await finalizeGit(intent,fresh);
+      admission.check();const current=await target();if(current.status==="running")throw new Error("Wait for the run to finish before Git reconciliation");await this.gitBarrier(current,commandId,false);const fresh=await inspectGit(intent);if(fresh.digest!==view.digest||!fresh.canReconcile)throw new Error("Git observations changed during acknowledgement; inspect again");await finalizeGit(intent,fresh);
       await this.storage.call("gitComplete",{id:commandId,from:intent.identity.head,to:view.head,reconciled:true,receipt:{sha:view.head,tree:view.tree,state:view.state,digest:view.digest,at:Date.now()}});
       await this.syncGit(row.cwd,intent.identity.head,view.head!);return view;
     }).finally(()=>this.gitReservations.delete(row.cwd));
@@ -866,7 +915,15 @@ export class PiHost {
     const now=Date.now(),idle=[...this.active.values()].filter(item=>this.evictable(item,now,pinned)).sort((a,b)=>(this.used.get(a.row.id)??0)-(this.used.get(b.row.id)??0));
     for(const item of idle){if(this.active.size<=this.maxLoaded)break;this.evict(item);}
   }
+  /** Unloaded sessions whose latest reply was an open ask_user question, so the sidebar keeps showing them as waiting. */
+  private askOpen=new Set<string>();
+  private asksUser({row,session}:Active){
+    if(row.status==="running"||!session.messages.length)return false;
+    const last=[...cachedVisibleMessages(session,row.cwd)].reverse().find(message=>!message.interim);
+    return last?.role==="assistant"&&!!last.question;
+  }
   private evict({session,row,unsubscribe}:Active){
+    if(this.asksUser({session,row} as Active))this.askOpen.add(row.id);
     this.active.delete(row.id);this.used.delete(row.id);
     try{unsubscribe();}catch{}
     try{session.dispose();}catch{}
@@ -960,7 +1017,11 @@ export class PiHost {
     if(result.status==="empty")return "; it made no file changes (nothing to integrate)";
     return pending(result.reason??"the merge did not complete");
   }
-  async list(){const rows=await this.storage.call<RecordRow[]>("sessions"),waiting=new Set([...this.pending.values()].filter(p=>!p.finalizing).map(p=>p.sessionId));return rows.map(r=>waiting.has(r.id)?{...r,waiting:true}:r);}
+  async list(){const rows=await this.storage.call<RecordRow[]>("sessions"),waiting=new Set([...this.pending.values()].filter(p=>!p.finalizing).map(p=>p.sessionId));
+    // A settled loaded session whose latest reply is an ask_user question also waits for the user.
+    for(const [id,active] of this.active)if(this.asksUser(active))waiting.add(id);
+    for(const id of this.askOpen)if(this.active.has(id))this.askOpen.delete(id);else waiting.add(id);
+    return rows.map(r=>waiting.has(r.id)?{...r,waiting:true}:r);}
   private async assertRegisteredSetup(row:RecordRow,setup:WorkspaceSetup){
     const immutable=(value:WorkspaceSetup|undefined)=>{if(!value)return null;const {phase,observedRevision,...identity}=value;return identity;};
     if(row.id!==setup.sessionId||row.cwd!==setup.cwd||row.managerId!==setup.managerId||row.parentId!==(setup.parentId??null)||row.model!==setup.model||row.role!==(setup.agentRole??"root")||row.policy?.version!==setup.policyVersion||JSON.stringify(row.policy?.requested)!==JSON.stringify(setup.requested)||row.policy?.effective.cwd!==setup.cwd||row.policy?.effective.model!==setup.model||JSON.stringify(row.policy?.effective.profile)!==JSON.stringify(setup.profile)||JSON.stringify(row.policy?.role??null)!==JSON.stringify(setup.role??null)||JSON.stringify(immutable(row.policy?.setup))!==JSON.stringify(immutable(setup)))throw new Error("Registered session differs from the exact saved setup owner and policy");
@@ -1147,7 +1208,7 @@ export class PiHost {
   }
   /** Tools a new root session (parallel mode, as the new-session screen creates) would get, for the @-picker before a session exists. */
   newSessionTools(cwd:string):MentionTool[]{
-    const allow=async()=>true,defs:Array<{name:string;description?:string}>=[...inspectionTools(cwd,this.protectPath,allow,()=>false),...mutationTools(cwd,allow as any,async()=>{},()=>false),this.bashTool({cwd} as RecordRow),{name:"delegate",description:delegateDescription(PARALLEL_CODE_PROFILE)},...this.browserUse?this.browserUse.tools("",()=>true,allow):[]];
+    const allow=async()=>true,defs:Array<{name:string;description?:string}>=[...inspectionTools(cwd,this.protectPath,allow,()=>false),...mutationTools(cwd,allow as any,async()=>{},()=>false),this.bashTool({cwd} as RecordRow),askUserTool(),{name:"delegate",description:delegateDescription(PARALLEL_CODE_PROFILE)},...this.browserUse?this.browserUse.tools("",()=>true,allow):[]];
     return defs.map((tool):MentionTool=>({name:tool.name,description:String(tool.description??"").split("\n")[0].slice(0,160)}));
   }
   /** Working folder, active tools and protected roots that @-mentions may not reach, for one open session. */
