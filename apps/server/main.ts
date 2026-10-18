@@ -14,6 +14,7 @@ import { WorkerMerge } from "./worker-merge.js";
 import { Storage } from "./storage.js";
 import type { JournalEvent, RoleReasoning, ProjectTaskView, ProjectView } from "../../packages/contracts/index.js";
 import { folderStatus, projectInput, projectStatus } from "./projects.js";
+import { projectAgentsInput } from "./roles.js";
 import { snapshotProjectTask } from "./project-task.js";
 import { chooseFolders } from "./folder-picker.js";
 import { CliproxyProcess } from "./cliproxy-process.js";
@@ -171,9 +172,10 @@ app.post("/api/folders/choose",async(_req,reply)=>{
 app.put<{Params:{id:string}}>("/api/projects/:id",async(req,reply)=>{
   if(!isUUID(req.params.id))return reply.code(400).send({error:"Valid project ID required"});
   try{
-    const project={id:req.params.id,...await projectInput(req.body)};
-    await storage.call("saveProject",project);
-    return {project};
+    const raw=(req.body as {agents?:unknown}|null)?.agents,agents=raw===undefined?undefined:projectAgentsInput(raw);
+    if(agents)await host.checkProjectAgents(agents);
+    await storage.call("saveProject",{id:req.params.id,...await projectInput(req.body),agents});
+    return {project:await storage.call<ProjectView>("project",{id:req.params.id})};
   }catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Cannot save project"});}
 });
 app.post<{Params:{id:string};Body:{archived?:unknown}}>("/api/projects/:id/archive",async(req,reply)=>{
@@ -227,7 +229,7 @@ app.post("/api/project-tasks",async(req,reply)=>{
     if(!project)return reply.code(404).send({error:"Project unavailable"});
     if(!(await host.models()).some(model=>`${model.provider}/${model.id}`===body.model))throw new Error("Selected model is unavailable");
     let snapshot=await snapshotProjectTask(project,body.model as string,id,requestHash,body.workspaceMode==="worktree"?"worktree":"direct");
-    snapshot.roleCatalog=await host.roles();if(reasoning)snapshot.reasoning=reasoning;
+    snapshot.roleCatalog=await host.projectRoles(project);if(reasoning)snapshot.reasoning=reasoning;
     snapshot=await host.prepareProjectTask(snapshot);admission.check();
     const inserted=await storage.call<{fresh:boolean;task:ProjectTaskView}>("addProjectTask",{...snapshot});
     if(!inserted.fresh)return {id,status:inserted.task.status};
@@ -247,23 +249,28 @@ app.post<{Params:{id:string};Body:{archived?:unknown}}>("/api/sessions/:id/archi
   try{return await host.archiveOwner(req.params.id,req.body?.archived!==false);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Cannot archive session"});}
 });
 app.post("/api/sessions",async(req,reply)=>{
-  const body=req.body as {cwd?:unknown;scratch?:unknown;model?:unknown;mode?:unknown;workspaceMode?:unknown;reasoning?:unknown};
+  const body=req.body as {cwd?:unknown;scratch?:unknown;model?:unknown;mode?:unknown;workspaceMode?:unknown;reasoning?:unknown;projectId?:unknown};
   if(!validReasoning(body?.reasoning))return reply.code(400).send({error:"Valid reasoning level required"});
+  if(body?.projectId!==undefined&&(typeof body.projectId!=="string"||!isUUID(body.projectId)||body.scratch!==undefined))return reply.code(400).send({error:"A project chat needs a valid project and one of its folders"});
   const scratch=body?.scratch===true;
   if(body?.scratch!==undefined&&(body.scratch!==true||body.cwd!==undefined))return reply.code(400).send({error:"Scratch chats take no workspace"});
   if(!scratch&&typeof body?.cwd!=="string"||typeof body?.model!=="string"||!(body.mode===undefined||body.mode==="read"||body.mode==="code"||body.mode==="parallel")||!(body.workspaceMode===undefined||body.workspaceMode==="direct"||body.workspaceMode==="worktree")||(body.workspaceMode!==undefined&&(body.mode===undefined||body.mode==="read")))return reply.code(400).send({error:"Workspace, model and valid mode required"});
   const id=req.headers["x-command-id"];
   if(typeof id!=="string"||!isUUID(id))return reply.code(400).send({error:"Command ID required"});
   let cwd=scratch?"":body.cwd as string;const model=body.model,mode=body.mode??"read",workspaceMode=body.workspaceMode??"direct",reasoning=(body.reasoning as RoleReasoning|null|undefined)??undefined;
+  // A chat started inside a project uses that project's agent settings on top of the global ones.
+  const projectId=body.projectId as string|undefined;
   try{return await host.withPromptAdmission(id,async admission=>{
     let fresh=false;
     try{
-      const requestHash=createHash("sha256").update(`${scratch?"\0scratch":cwd}\0${model}${mode!=="read"?`\0${mode}`:""}${workspaceMode==="worktree"?"\0worktree":""}${reasoning?`\0reasoning:${reasoning}`:""}`).digest("hex");
+      const requestHash=createHash("sha256").update(`${scratch?"\0scratch":cwd}\0${model}${mode!=="read"?`\0${mode}`:""}${workspaceMode==="worktree"?"\0worktree":""}${reasoning?`\0reasoning:${reasoning}`:""}${projectId?`\0project:${projectId}`:""}`).digest("hex");
       const command=await storage.call<{fresh:boolean;status:string}>("command",{id,sessionId:id,kind:"create",requestHash});fresh=command.fresh;
       admission.check();
       if(!command.fresh)return {id,status:command.status};
+      let roleCatalog;
+      if(projectId){const project=await storage.call<ProjectView|undefined>("project",{id:projectId});if(!project?.folders.includes(cwd))throw new Error("The chat folder is not part of the selected project");roleCatalog=await host.projectRoles(project);}
       if(scratch)cwd=await createScratchDir(id);admission.check();
-      await host.create(cwd,model,id,mode,{workspaceMode,commandId:id,...(reasoning?{reasoning}:{})});admission.check();await storage.call("commandStatus",{id,status:"completed"});return {id,status:"completed"};
+      await host.create(cwd,model,id,mode,{workspaceMode,commandId:id,...(reasoning?{reasoning}:{}),...(roleCatalog?{roleCatalog}:{})});admission.check();await storage.call("commandStatus",{id,status:"completed"});return {id,status:"completed"};
     }catch(error){let unresolved=false;if(fresh){const saved=await storage.call<any>("commandSetupGet",{id});unresolved=["allocating","allocated","registered","opened","dispatching"].includes(saved?.setup?.phase);await storage.call("commandStatus",{id,status:unresolved?"unknown":"rejected"});}return reply.code(unresolved?409:400).send({id,status:unresolved?"unknown":"rejected",error:error instanceof Error?error.message:"Cannot create session"});}
   });}catch(error){return reply.code(400).send({id,status:"rejected",error:error instanceof Error?error.message:"Cannot admit session"});}
 });

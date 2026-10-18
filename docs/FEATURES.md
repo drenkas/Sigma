@@ -24,7 +24,7 @@
 
 **Pi SDK sign-in.** **Cancel sign-in** скасовує взаємодію до повернення credentials; якщо SDK save/model sync уже почався — чекає його завершення. Configured — стан конфігурації, не гарантія доступної моделі чи строку дії. Застарілі status/model відповіді не замінюють новий login/вибір моделі; помилки показуються без приватного auth content.
 
-**Agents.** Проста відповідність роль → модель + reasoning для planner, researcher, worker (Implementation), reviewer, QA; без instructions. Явна модель має підтримувати рівень; для "Same as chat model" непідтримуваний рівень замінюється на default моделі. Модель чату є оркестратором (root і coordinator завжди на ній) і сама обирає, яких агентів викликати за розміром задачі. Недоступна configured model дає явну помилку. Старі каталоги з групами нормалізуються при читанні.
+**Agents.** Проста відповідність роль → модель + reasoning для planner, researcher, worker (Implementation), reviewer, QA; без instructions. Явна модель має підтримувати рівень; для "Same as chat model" непідтримуваний рівень замінюється на default моделі. Модель чату є оркестратором (root і coordinator завжди на ній) і сама обирає, яких агентів викликати за розміром задачі. Недоступна configured model дає явну помилку. Старі каталоги з групами нормалізуються при читанні. Проєкт зберігає власні overrides (`ProjectView.agents`: роль + лише ті поля `model`/`reasoning`, які він змінює; відсутнє поле = Global). Новий чат, створений з `projectId` у папці цього проєкту, і multi-repository task проєкту знімають snapshot каталогу global + overrides; якщо модель і рівень приходять з різних шарів і модель цей рівень не підтримує, рівень стає default моделі. Збереження проєкту без `agents` лишає наявні overrides.
 
 ## Git у сесії
 

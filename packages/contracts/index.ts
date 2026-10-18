@@ -112,7 +112,9 @@ export interface AskQuestion {question:string;options:Array<{label:string;descri
 export interface SessionView { archivedAt?:number|null; id: string; cwd: string; model: string; policy: SessionPolicy | null; status: RunStatus; cursor: number; agents: AgentView[]; approvals: ApprovalView[]; grants?: string[]; recoveryInputs: RecoveryInput[]; recoveryActions: RecoveryAction[]; messages: Array<{ role: string; text: string; id: string; at?: number; images?: number; interim?: true; work?: WorkView; question?: AskQuestion }>; }
 export interface JournalEvent { seq: number; sessionId: string; type: string; payload: unknown; at: number; }
 
-export interface ProjectView { id:string; name:string; folders:string[]; archivedAt?:number|null; }
+/** A project's change to one agent: a field that is present replaces the global Agents setting for chats in that project, an absent field keeps the global one. `model:null` is "Same as chat model", `reasoning:null` is "Model default". */
+export interface ProjectRoleOverride {role:AgentRole;model?:string|null;reasoning?:RoleReasoning|null;}
+export interface ProjectView { id:string; name:string; folders:string[]; archivedAt?:number|null; agents?:ProjectRoleOverride[]; }
 export interface ProjectTaskView {
   id:string;projectId:string;projectName:string;coordinatorId:string;model:string;requestHash:string;
   workspaceMode?:WorkspaceMode;
