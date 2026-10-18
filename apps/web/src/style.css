@@ -254,13 +254,15 @@ select.input option{background:var(--surface-2)}
 .chosen-folders{display:flex;flex-direction:column;gap:var(--s2)}
 .chosen-folders li{display:flex;align-items:center;gap:var(--s3)}
 .chosen-folders .repo-path{min-width:0;flex:1}.chosen-folders .btn{flex-shrink:0}
-.repo-list{display:flex;flex-direction:column;gap:var(--s3)}
+.repo-list{display:flex;flex-direction:column;gap:var(--s2)}
 .repo-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--s2)}
 .repo-name{font-size:15px;overflow-wrap:anywhere}
 .repo-path{overflow-wrap:anywhere;color:var(--text-3)}
-.git-counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:var(--s3)}
-.git-counts dt{font-size:12px;color:var(--text-3)}
-.git-counts dd{font-size:17px;font-weight:600}
+.repo-list .project-folder{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface-2)}
+.project-folder .repo-name{font-weight:600}
+.project-folder .repo-path{flex:1 1 120px;min-width:0;font-size:12px}
+.project-folder .btn{margin-left:auto}
+.task-workspace{width:auto;flex:1 1 220px}
 
 /* ---------- multi-repository task ---------- */
 .task-overview{flex:none;display:flex;flex-direction:column;gap:var(--s3);max-height:42dvh;overflow:auto;padding:var(--s4) var(--s5);border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--surface)}

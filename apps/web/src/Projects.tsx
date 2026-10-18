@@ -1,10 +1,18 @@
 import { createEffect, createMemo, createSignal, For, Show, onCleanup, type JSX } from "solid-js";
-import { AGENT_ROLES, type AgentRole, type ProjectRoleOverride, type ProjectStatus, type ProjectView, type RoleCatalog, type RoleReasoning } from "../../../packages/contracts/index.js";
+import { AGENT_ROLES, type AgentRole, type FolderStatus, type ProjectRoleOverride, type ProjectStatus, type ProjectView, type RoleCatalog, type RoleReasoning } from "../../../packages/contracts/index.js";
 import { api } from "./api.js";
 import { LABELS } from "./Roles.js";
 
 type Model={provider:string;id:string;name:string;reasoningLevels?:string[];legacy?:boolean};
 const ALL_LEVELS=["off","minimal","low","medium","high","xhigh","max"],GLOBAL="global";
+const name=(path:string)=>path.split("/").filter(Boolean).pop()||path;
+const dirty=(f:FolderStatus)=>!!(f.staged||f.unstaged||f.untracked||f.conflicts);
+function summary(f:FolderStatus){
+  if(f.state!=="git")return f.state==="folder"?"Ordinary folder · no Git":f.state==="missing"?"Folder unavailable":f.error??"Git status unavailable";
+  const changed=(f.staged??0)+(f.unstaged??0);
+  const parts=[changed?`${changed} changed`:"",f.untracked?`${f.untracked} untracked`:"",f.conflicts?`${f.conflicts} conflict${f.conflicts===1?"":"s"}`:""].filter(Boolean);
+  return parts.length?parts.join(" · "):"Clean";
+}
 const has=(item:ProjectRoleOverride|undefined,key:"model"|"reasoning")=>!!item&&Object.prototype.hasOwnProperty.call(item,key);
 
 export function Projects(p:{project:ProjectView|undefined;models:Model[];onSaved:(project:ProjectView)=>void;onFolder:(path:string)=>void;onCreateTask:(project:ProjectView,workspaceMode:"direct"|"worktree")=>void;taskBusy:boolean;model:string;onClose:()=>void;menu:JSX.Element;pending:number;editRequest:number}){
@@ -15,6 +23,7 @@ export function Projects(p:{project:ProjectView|undefined;models:Model[];onSaved
   const [status,setStatus]=createSignal<ProjectStatus|null>(null),[loading,setLoading]=createSignal(false),[saving,setSaving]=createSignal(false),[error,setError]=createSignal("");
   const taskRoots=createMemo(()=>new Set(status()?.folders.filter(folder=>folder.state==="git"&&folder.oid&&folder.repository).map(folder=>folder.repository)).size);
   const taskEligible=createMemo(()=>{const folders=status()?.folders;if(!folders||folders.length<2||folders.length>4||!folders.every(folder=>folder.state==="git"&&folder.oid&&folder.repository)||taskRoots()!==folders.length)return false;const roots=folders.map(folder=>folder.repository!);return !roots.some((root,i)=>roots.some((other,j)=>i!==j&&root.startsWith(`${other}/`)));});
+  const taskBlocker=()=>{const folders=status()?.folders??[];return folders.length>4?`Works with 2–4 folders; this project has ${folders.length}.`:!folders.every(folder=>folder.state==="git"&&folder.oid)?"Every folder must be a Git repository with at least one commit.":"Each folder must be its own repository, not a duplicate or nested one.";};
   let generation=0;
   async function refresh(project=p.project){
     const version=++generation;setStatus(null);setError("");
@@ -80,12 +89,11 @@ export function Projects(p:{project:ProjectView|undefined;models:Model[];onSaved
     <Show when={p.pending}><div class="banner warning" role="status">A chat is waiting for {p.pending} tool approval(s).<button class="link-btn" onClick={p.onClose}>Review in chat</button></div></Show>
     <div class="scroller">
       <div class="project-content">
-        <div class="project-actions">
+        <Show when={!draft()}><div class="project-actions">
           <button class="btn primary" onClick={()=>edit()} disabled={saving()||choosing()}>New project</button>
-          <Show when={p.project}><button class="btn ghost" onClick={()=>edit(p.project)} disabled={saving()||choosing()}>Edit project</button><button class="btn ghost" onClick={()=>void refresh()} disabled={loading()||saving()}>{loading()?"Checking…":"Refresh Git"}</button><button class="btn primary" onClick={()=>p.onCreateTask(p.project!,taskWorkspaceMode())} disabled={!taskEligible()||!p.model||p.taskBusy||loading()||saving()}>{p.taskBusy?"Creating task…":"New multi-repository task"}</button></Show>
-        </div>
-        <Show when={p.project}><label class="field"><span class="field-label">Repository workspace for new task</span><select class="input" value={taskWorkspaceMode()} disabled={p.taskBusy} onChange={e=>setTaskWorkspaceMode(e.currentTarget.value as "direct"|"worktree")}><option value="direct">Selected folders · default</option><option value="worktree">Separate Git worktrees</option></select></label><p class="field-help">{taskWorkspaceMode()==="direct"?"Approved edits change the selected folders immediately; current diffs may include pre-existing changes.":"Each repository gets a worktree at its current commit. Existing uncommitted changes stay in the source folders; applying results there requires a separate approval."}</p></Show>
-        <Show when={p.project}><p class="field-help">A multi-repository task captures all folders in this project. Choose 2–4 distinct Git repositories with commits; ordinary folders, duplicates, nested repositories and projects with 5+ folders are not eligible. Currently {taskRoots()} distinct committed Git root{taskRoots()===1?"":"s"} ready. Model: {p.model||"choose one under New session"}.</p></Show>
+          <Show when={p.project}><button class="btn ghost" onClick={()=>edit(p.project)} disabled={saving()||choosing()}>Edit project</button><button class="btn ghost" onClick={()=>void refresh()} disabled={loading()||saving()} title="Reads local Git data; does not fetch, pull or push">{loading()?"Checking…":"Refresh Git"}</button>
+            <Show when={status()}>{snapshot=><span class="muted small" role="status">Checked {new Date(snapshot().checkedAt).toLocaleTimeString()}</span>}</Show></Show>
+        </div></Show>
         <Show when={error()}><div class="banner error" role="alert">{error()}</div></Show>
         <Show when={draft()}>{value=><form class="project-editor" onSubmit={e=>{e.preventDefault();void save();}}>
           <h2 class="panel-title">{p.project?.id===value().id?"Edit project":"New project"}</h2>
@@ -120,33 +128,36 @@ export function Projects(p:{project:ProjectView|undefined;models:Model[];onSaved
           <div class="project-actions"><button class="btn primary" type="submit" disabled={saving()||choosing()||!value().folders.length}>{saving()?"Saving…":"Save project"}</button><button class="btn ghost" type="button" disabled={saving()} onClick={()=>{picker?.abort();setDraft(null);}}>Cancel</button></div>
         </form>}</Show>
         <Show when={!p.project&&!draft()}><div class="project-empty"><h2>Group the folders you work on</h2><p>Create a named project for your frontend, backend and any other folders. Each repository keeps its own Git state.</p><p class="muted">Use one folder for a session, or select a project with two Git repositories to start a multi-repository task.</p></div></Show>
-        <Show when={p.project?.agents?.length&&!draft()}><p class="field-help">Agents: {AGENT_ROLES.filter(role=>p.project!.agents!.some(item=>item.role===role)).map(role=>LABELS[role]).join(", ")} use this project's settings; the rest follow the Agents page.</p></Show>
-        <Show when={p.project}>
-          <p class="field-help">Ahead (push) and behind (pull) use the locally known upstream. Refresh reads local Git data; it does not fetch, pull or push. A separately configured push target may differ.</p>
-          <Show when={loading()}><p role="status" class="muted">Reading repository status…</p></Show>
-          <Show when={status()}>{snapshot=><>
-            <p class="muted small" role="status">Checked {new Date(snapshot().checkedAt).toLocaleTimeString()} · {snapshot().folders.length} folders</p>
-            <ul class="repo-list"><For each={snapshot().folders}>{folder=><li class="repo-card">
-              <div class="repo-heading"><h2 class="repo-name">{folder.path.split("/").filter(Boolean).pop()||folder.path}</h2><button class="btn ghost sm" disabled={folder.state==="missing"} onClick={()=>p.onFolder(folder.path)} aria-label={`Use folder ${folder.path} for a new chat`}>Use for chat</button></div>
-              <p class="mono repo-path">{folder.path}</p>
-              <Show when={folder.state==="git"}>
-                <div class="project-actions"><span class="tag mono">{folder.branch??`Detached HEAD · ${folder.oid?.slice(0,8)??"unknown"}`}</span><Show when={!folder.oid}><span class="tag">No commits yet</span></Show>
-                  <span class={`badge ${(folder.staged||folder.unstaged||folder.untracked||folder.conflicts)?"st-interrupted":"ap-approved"}`}>{(folder.staged||folder.unstaged||folder.untracked||folder.conflicts)?"Uncommitted changes":"Clean"}</span>
-                </div>
-                <Show when={folder.repository!==folder.path}><p class="field-help repo-path">Git root: {folder.repository} · status covers the whole repository</p></Show>
-                <dl class="git-counts"><div><dt>Staged</dt><dd>{folder.staged}</dd></div><div><dt>Unstaged</dt><dd>{folder.unstaged}</dd></div><div><dt title="Files or directories not tracked by Git">Untracked entries</dt><dd>{folder.untracked}</dd></div><div><dt>Conflicts</dt><dd>{folder.conflicts}</dd></div></dl>
-                <Show when={folder.upstream} fallback={<p class="field-help">No upstream configured · pull/push counts unavailable</p>}>
-                  <p class="field-help repo-path">Upstream: <span class="mono">{folder.upstream}</span></p>
-                  <Show when={folder.ahead!==null&&folder.behind!==null} fallback={<p class="field-help warn">Upstream commit unavailable locally · pull/push counts unknown</p>}>
-                    <div class="project-actions"><span class="tag">↑ Ahead (push): {folder.ahead}</span><span class="tag">↓ Behind (pull): {folder.behind}</span><Show when={folder.ahead!>0&&folder.behind!>0}><span class="badge st-interrupted">Diverged</span></Show></div>
-                  </Show>
+        <Show when={p.project&&!draft()}>
+          <Show when={p.project!.agents?.length}><p class="field-help">Agents: {AGENT_ROLES.filter(role=>p.project!.agents!.some(item=>item.role===role)).map(role=>LABELS[role]).join(", ")} use this project's settings; the rest follow the Agents page.</p></Show>
+          <Show when={loading()&&!status()}><p role="status" class="muted">Reading repository status…</p></Show>
+          <Show when={status()}>{snapshot=><ul class="repo-list"><For each={snapshot().folders}>{folder=><li class="project-folder">
+            <span class="repo-name">{name(folder.path)}</span>
+            <span class="mono repo-path truncate" title={folder.repository&&folder.repository!==folder.path?`${folder.path} · Git root ${folder.repository}`:folder.path}>{folder.path}</span>
+            <Show when={folder.state==="git"} fallback={<span class={folder.state==="folder"?"muted small":"field-help warn"}>{summary(folder)}</span>}>
+              <span class="tag mono">{folder.branch??(folder.oid?`detached ${folder.oid.slice(0,7)}`:"no commits")}</span>
+              <span class={`badge ${dirty(folder)?"st-interrupted":"ap-approved"}`} title={folder.repository!==folder.path?`Covers the whole repository at ${folder.repository}`:undefined}>{summary(folder)}</span>
+              <Show when={folder.upstream} fallback={<span class="muted small">No upstream</span>}>
+                <Show when={folder.ahead!==null&&folder.behind!==null} fallback={<span class="muted small" title={`${folder.upstream} is not available locally`}>↑? ↓?</span>}>
+                  <span classList={{"sync-count":true,hot:!!folder.ahead}} title={`Commits to push to ${folder.upstream} (locally known upstream)`}>↑{folder.ahead}</span><span classList={{"sync-count":true,hot:!!folder.behind}} title={`Commits to pull from ${folder.upstream} (locally known upstream)`}>↓{folder.behind}</span>
+                  <Show when={folder.ahead!>0&&folder.behind!>0}><span class="badge st-interrupted">Diverged</span></Show>
                 </Show>
               </Show>
-              <Show when={folder.state==="folder"}><p class="muted">Ordinary folder · no Git working tree</p></Show>
-              <Show when={folder.state==="missing"}><p class="field-help warn">Folder unavailable or no longer a directory</p></Show>
-              <Show when={folder.state==="error"}><p class="field-help warn">{folder.error}</p></Show>
-            </li>}</For></ul>
-          </>}</Show>
+            </Show>
+            <button class="btn ghost sm" disabled={folder.state==="missing"} onClick={()=>p.onFolder(folder.path)} aria-label={`Use folder ${folder.path} for a new chat`}>Use for chat</button>
+          </li>}</For></ul>}</Show>
+          <Show when={taskRoots()>=2}><section class="repo-card" aria-labelledby="project-task-title">
+            <h2 id="project-task-title" class="repo-name">Multi-repository task</h2>
+            <Show when={taskEligible()} fallback={<p class="field-help warn">{taskBlocker()}</p>}>
+              <p class="field-help">One task across all {taskRoots()} repositories: a coordinator hands each repository to its own session.</p>
+              <div class="project-actions">
+                <label class="sr-only" for="project-task-workspace">Repository workspace</label>
+                <select id="project-task-workspace" class="input task-workspace" value={taskWorkspaceMode()} disabled={p.taskBusy} onChange={e=>setTaskWorkspaceMode(e.currentTarget.value as "direct"|"worktree")}><option value="direct">Edit the folders directly</option><option value="worktree">Separate Git worktrees</option></select>
+                <button class="btn primary" onClick={()=>p.onCreateTask(p.project!,taskWorkspaceMode())} disabled={!p.model||p.taskBusy||loading()||saving()}>{p.taskBusy?"Creating task…":"New multi-repository task"}</button>
+              </div>
+              <p class="field-help">{!p.model?"Choose a model under New session first.":taskWorkspaceMode()==="direct"?"Approved edits land in these folders; diffs may include changes that were already there.":"Each repository works in its own worktree; applying results back needs a separate approval."}</p>
+            </Show>
+          </section></Show>
         </Show>
       </div>
     </div>
