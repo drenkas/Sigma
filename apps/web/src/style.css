@@ -114,6 +114,15 @@ kbd{border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:
 .repo-actions{display:flex;gap:var(--s2)}
 .repo-actions .btn{flex:1}
 .repo-result{overflow-wrap:anywhere}
+.stash-input{flex:1;min-width:0;width:auto}
+.repo-items{display:flex;flex-direction:column;list-style:none;padding:0;border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.repo-items:empty{display:none}
+.repo-item{display:flex;align-items:center;gap:var(--s2);padding:6px var(--s3);border-top:1px solid var(--border);font-size:12.5px}
+.repo-item:first-child{border-top:0}
+.repo-item-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.repo-item-actions{display:flex;gap:4px;flex-shrink:0}
+.repo-item.stack{flex-direction:column;align-items:stretch}
+.repo-item.stack .repo-item-actions .btn{flex:1}
 .col-title{font-size:13px;font-weight:600;flex:1}
 .scrim{display:none}
 .shell .only-nav,.shell .only-details{display:none}

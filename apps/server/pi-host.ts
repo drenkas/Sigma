@@ -16,7 +16,7 @@ import { BROWSER_TOOLS, BrowserUse, isBrowserTool } from "./browser-use.js";
 import { isQaTool, qaReviewTools, qaTools, QA_REVIEW_TOOLS, QA_TOOLS, type Qa } from "./qa-runs.js";
 import { sweepCrashTemps } from "./crash-temps.js";
 import { formatShellResult, killAllShells, protectedRoots, runShell, sandboxAvailable, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } from "./shell-tool.js";
-import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch } from "./git-actions.js";
+import { commitMessage, gitBranches, gitHead, pushArgs, gitPull, gitSwitch, stashArgs } from "./git-actions.js";
 import { prepareCommit, executeCommit, gitIdentity, dispatchGit, inspectGit, finalizeGit, type GitIntent } from "./git-intents.js";
 import { stripMentionContext, type MentionTool } from "./mentions.js";
 import { ASK_USER_TOOL, askQuestion, askUserTool } from "./ask-user.js";
@@ -44,6 +44,8 @@ function toolDetail(cwd:string,tool:string,args:any):string|undefined{
   if(tool===ASK_USER_TOOL&&typeof args.question==="string")return clip(args.question);
 }
 const DEFAULT_REASONING:RoleReasoning="medium"; // Pi's DEFAULT_THINKING_LEVEL when no level is requested
+type GitAction="switch"|"pull"|"push"|"stash";
+type GitActionBody={branch?:unknown;op?:unknown;ref?:unknown;oid?:unknown;message?:unknown};
 type RecordRow = { id:string; cwd:string; file:string; managerId:string|null; dispatchStarted?:boolean; archivedAt?:number|null; model:string; policy:SessionPolicy|null; status:SessionView["status"]; parentId:string|null; role:string; rootId?:string; ancestors?:string[] };
 const ORCHESTRATOR_PROMPT=`You are the orchestrator. Before starting any work, classify the task against the criteria below, then choose the agents with the delegate tool. If the user states the mode or size in their message, follow it without asking. If the criteria do not clearly determine the size, do NOT guess and do not start work. The size is unclear when: the request is vague or open-ended (e.g. 'improve', 'clean up', 'make it better', 'refactor this project') without naming specific files, behaviour or an expected outcome; the scope could reasonably be read as either a small fix or a broad change; or the task sits on the border of two sizes. In those cases ask before doing anything, including before delegating to a planner or researcher. To ask: call the ask_user tool with one short question and the two candidate sizes as options, each option saying what that size would mean, then wait for the answer. For example: question "This looks between medium and complex. Which do you prefer?", options "Medium" (I implement via a worker and get it reviewed) and "Complex" (a planner first, then worker, reviewer). Asking one extra question is better than guessing.
 
@@ -736,7 +738,7 @@ export class PiHost {
     for(const {row} of this.active.values())if(row.cwd===cwd&&row.policy?.workspace?.kind==="direct"&&row.policy.workspace.baseCommit===from)row.policy={...row.policy,workspace:{...row.policy.workspace,baseCommit:to}};
     for(const row of await this.storage.call<Array<{id:string;cwd:string}>>("sessions"))if(row.cwd===cwd)await this.send(row.id,"repository_changed",{head:to},true);
   }
-  private gitOperation<T>(row:RecordRow,id:string,kind:GitIntent["kind"],params:{message?:string;branch?:unknown},action:(intent:GitIntent,save:(intent:GitIntent)=>Promise<void>,admission:PromptAdmission)=>Promise<T>):Promise<T>{
+  private gitOperation<T>(row:RecordRow,id:string,kind:GitIntent["kind"],params:{message?:string;branch?:unknown;op?:unknown;ref?:unknown;oid?:unknown},action:(intent:GitIntent,save:(intent:GitIntent)=>Promise<void>,admission:PromptAdmission)=>Promise<T>):Promise<T>{
     if(this.gitReservations.has(row.cwd))return Promise.reject(new Error("Repository Git action already admitted"));
     this.gitReservations.add(row.cwd);
     return this.withPromptAdmission(row.id,async admission=>{
@@ -747,7 +749,7 @@ export class PiHost {
       let intent:GitIntent|undefined=initial,completed=false;
       const save=(value:GitIntent)=>this.storage.call<void>("gitSave",{id,intent:value});
       try{
-        admission.check();await this.gitBarrier(row,id,kind!=="push");admission.check();
+        admission.check();await this.gitBarrier(row,id,kind!=="push"&&kind!=="stash");admission.check();
         intent=initial;
         if(kind==="commit"){
           await assertWorkspaceHead(row.cwd,row.policy!.workspace!);
@@ -768,17 +770,17 @@ export class PiHost {
       }
     }).finally(()=>this.gitReservations.delete(row.cwd));
   }
-  gitAction(id:string,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(id,()=>this.gitTarget(id),action,body,commandId);}
-  folderGitAction(path:unknown,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){return this.runGitAction(`folder:${path}`,()=>this.folderTarget(path),action,body,commandId);}
-  private async runGitAction(id:string,target:()=>Promise<RecordRow>,action:"switch"|"pull"|"push",body:{branch?:unknown},commandId?:string){
+  gitAction(id:string,action:GitAction,body:GitActionBody,commandId?:string){return this.runGitAction(id,()=>this.gitTarget(id),action,body,commandId);}
+  folderGitAction(path:unknown,action:GitAction,body:GitActionBody,commandId?:string){return this.runGitAction(`folder:${path}`,()=>this.folderTarget(path),action,body,commandId);}
+  private async runGitAction(id:string,target:()=>Promise<RecordRow>,action:GitAction,body:GitActionBody,commandId?:string){
     return this.withPromptAdmission(id,async owner=>{
     const row=await target();owner.check();if(row.status==="running")throw new Error("Wait for the run to finish");
     if(!commandId||commandId.length>200)throw new Error("X-Command-Id required for Git actions");
-    return this.gitOperation(row,commandId,action,action==="switch"?{branch:body.branch}:{},async(intent,save,admission)=>{
+    return this.gitOperation(row,commandId,action,action==="switch"?{branch:body.branch}:action==="stash"?{op:body.op,ref:body.ref,oid:body.oid,message:typeof body.message==="string"?body.message:undefined}:{},async(intent,save,admission)=>{
       if((action==="pull"||action==="push")&&intent.identity.ref==="HEAD")throw new Error("HEAD is detached; switch to a branch first");
       if(action==="switch"&&(typeof body.branch!=="string"||!body.branch||body.branch.startsWith("-")||!(await gitBranches(row.cwd)).includes(body.branch)))throw new Error("Choose an existing local branch");
       admission.check();if(JSON.stringify(await gitIdentity(row.cwd))!==JSON.stringify(intent.identity))throw new Error("Repository changed before Git dispatch");
-      const args=action==="switch"?["switch",body.branch as string]:action==="push"?await pushArgs(row.cwd):["pull","--ff-only","--no-rebase"];
+      const args=action==="switch"?["switch",body.branch as string]:action==="push"?await pushArgs(row.cwd):action==="stash"?await stashArgs(row.cwd,body):["pull","--ff-only","--no-rebase"];
       const output=await dispatchGit(intent,args,save,admission.check,undefined,async()=>{if(JSON.stringify(await gitIdentity(row.cwd))!==JSON.stringify(intent.identity))throw new Error("Repository changed before Git dispatch");},action==="push");return {output};
     });
     });
