@@ -2,12 +2,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { chromeUserDataDir } from "./chrome-path.js";
+import { AGENT_TIMEOUT_MS } from "../../packages/contracts/index.js";
 
 /** Runs agent shell commands on the host inside a macOS sandbox-exec profile that denies Sigma's credential files. */
 export const SANDBOX_EXEC="/usr/bin/sandbox-exec";
 export const SHELL="/bin/zsh";
-export const DEFAULT_TIMEOUT_SECONDS=300;
-export const MAX_TIMEOUT_SECONDS=1800;
+export const DEFAULT_TIMEOUT_SECONDS=AGENT_TIMEOUT_MS/1000;
+export const MAX_TIMEOUT_SECONDS=AGENT_TIMEOUT_MS/1000;
 export const MAX_OUTPUT_BYTES=30*1024;
 
 /** Environment names that carry Sigma-internal state or provider credentials; none of them reach agent commands. */
@@ -40,7 +41,7 @@ export function protectedRoots(dataDir:string,agentDir:string,home=process.env.H
   const dataDirs=[dataDir,...(extraDataDir?[extraDataDir]:[])],files:string[]=[],dirs:string[]=[];
   for(const data of dataDirs){
     files.push(...["agent-access.json","native-providers.json","state.sqlite","state.sqlite-wal","state.sqlite-shm","sigma.lock"].map(name=>join(data,name)));
-    dirs.push(join(data,"git-intents"),join(data,"cliproxyapi"),join(data,"antigravity-profile"),join(data,"browser-use"));
+    dirs.push(join(data,"logs"),join(data,"git-intents"),join(data,"cliproxyapi"),join(data,"antigravity-profile"),join(data,"browser-use"));
     // Pi SDK keeps provider keys in the agent folder; its sessions, settings and the rest stay readable.
     for(const sdk of [join(data,"agent")])files.push(...["auth.json","models.json","models-store.json"].map(name=>join(sdk,name)));
   }

@@ -1,4 +1,5 @@
 import { Cleanup } from "./cleanup.js";
+import { Diagnostics, failureReason, observeFatalErrors } from "./diagnostics.js";
 import Fastify from "fastify";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -33,6 +34,9 @@ const setting=(name:string)=>process.env[`SIGMA_${name}`]??process.env[`PI_ORCH_
 const lease=await DataLease.acquire(setting("DATA_DIR")?resolve(setting("DATA_DIR")!):join(root,".data"));
 await startupMigration(lease,setting("MIGRATE_PUBLISH"),process.env.SIGMA_MIGRATION_STAGE?resolve(process.env.SIGMA_MIGRATION_STAGE):defaultStageRoot(lease.directory));
 const dataDir=lease.directory;
+const diagnostics=new Diagnostics(dataDir);
+observeFatalErrors(diagnostics);
+diagnostics.write("service_start");
 const defaultWorkspace=setting("DEFAULT_WORKSPACE")??process.cwd();
 let parentGone=false,serviceListening=false,appClosing=false,shutdown:(()=>Promise<void>)|undefined;
 if(setting("PARENT_WATCH")==="1"){
@@ -45,6 +49,8 @@ if(setting("PARENT_WATCH")==="1"){
 }
 const storage=new Storage(join(dataDir,"state.sqlite"));
 const app=Fastify({logger:false,bodyLimit:100_000});
+app.addHook("onError",async(_req,reply,error)=>{diagnostics.write("http_error",{statusCode:error.statusCode&&error.statusCode>=400?error.statusCode:500,reason:failureReason(error)});});
+app.addHook("onResponse",async(_req,reply)=>{if(reply.statusCode>=500)diagnostics.write("http_error",{statusCode:reply.statusCode,reason:"internal_error"});});
 const port=Number(setting("PORT")||4318);
 if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid local port");
 const devUiPort=4317;
@@ -660,7 +666,7 @@ shutdown=()=>shutdownWork??=(async()=>{
   ]);
   await settle(()=>localProxy.close());
   await settle(()=>storage.close());
-  if(failures.length)throw new AggregateError(failures,"Shutdown did not finish cleanly");
+  if(failures.length){diagnostics.write("service_error",{reason:"shutdown"});throw new AggregateError(failures,"Shutdown did not finish cleanly");}
   lease.close();
 })();
 process.once("SIGINT",()=>{if(shutdown)void shutdown().then(()=>process.exit(0),()=>process.exit(1));});
@@ -683,6 +689,6 @@ else try{
       if(!appClosing&&!host.cliproxyProviders.view().connected)throw new Error("Local catalog is unavailable.");
     }finally{clearTimeout(timeout);}
   }}
-  catch{if(!appClosing)console.warn("Local CLIProxyAPI is unavailable. Check its private deployment and provider status.");}
+  catch(error){if(!appClosing){diagnostics.write("service_error",{reason:failureReason(error)});console.warn("Local CLIProxyAPI is unavailable. Check its private deployment and provider status.");}}
   if(!appClosing){await app.listen({host:"127.0.0.1",port});serviceListening=true;console.log(`Sigma API listening on http://127.0.0.1:${port}`);}
-}catch{await shutdown();throw new Error("Sigma could not start its local service.");}
+}catch(error){diagnostics.write("service_error",{reason:failureReason(error)});await shutdown();throw new Error("Sigma could not start its local service.");}

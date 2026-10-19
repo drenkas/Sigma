@@ -1,4 +1,6 @@
 import { providerAllowed } from "./provider-allowlist.js";
+import { Diagnostics, failureReason, type DiagnosticEvent, type DiagnosticFields, type FailureReason } from "./diagnostics.js";
+import { AGENT_TIMEOUT_MS } from "../../packages/contracts/index.js";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants, lstatSync, realpathSync, openSync, readFileSync, readdirSync, closeSync } from "node:fs";
@@ -84,7 +86,7 @@ Rules for every delegation:
 - If a delegation fails, continue the work yourself.
 - You and your agents can run shell commands with the bash tool (tests, builds, linters, git, package managers, curl). Tell each worker to run the project's tests and build after its changes and to fix what fails; tell each reviewer to run the tests and build to verify the work instead of only reading the diff. Report failures honestly: say which command failed and why, and never claim that something passes unless you saw it pass.`;
 type DelegationContext = {root:RecordRow;depth:number;ancestors:string[];canDelegate:boolean};
-type Active = { session:AgentSession; row:RecordRow; unsubscribe:()=>void; metadata?:RunMetadata };
+type Active = { session:AgentSession; row:RecordRow; unsubscribe:()=>void; metadata?:RunMetadata; startedAt?:number; stopReason?:FailureReason; deadline?:ReturnType<typeof setTimeout> };
 type ApprovalMode="full"|"ask";
 // Tools a user may allow for a whole chat. Commits stay one decision each: every commit shows its own message and diff.
 const GRANTABLE_TOOLS=new Set(["read","ls","edit","write","bash","browser_action","qa_action"]);
@@ -117,7 +119,7 @@ export function openPiHistory(path:string,managerDir:string,cwd:string,entries:u
   return new (SessionManager as unknown as new(cwd:string,sessionDir:string,sessionFile:string,persist:boolean,options:undefined,entries:unknown[])=>SessionManager)(cwd,managerDir,path,true,undefined,entries);
 }
 
-const delegateDescription=(profile:{maxDepth:number;childTimeoutMs:number})=>`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${profile.childTimeoutMs/1000}s timeout. Child work is not automatically verified.`;
+const delegateDescription=(profile:{maxDepth:number;childTimeoutMs:number})=>`Start a bounded child Pi agent (planner, researcher, worker, reviewer or qa). Planner and researcher are read-only. Each agent runs on the model and reasoning the user mapped to its role. Maximum depth ${profile.maxDepth}; each child has a ${AGENT_TIMEOUT_MS/1000}s timeout. Child work is not automatically verified.`;
 
 // Snapshots are read on every chat switch and after every reply; rebuild the visible messages only when the history changed.
 // Pi appends finished messages (message_end) and replaces the array on compaction, so array, length, last message and entry count identify a version.
@@ -213,12 +215,30 @@ export class PiHost {
   private backgroundFailure=false;
   private bashExits=new Map<string,string>();
   private protectPath:PathGuard=()=>{throw new Error("Credential guard unavailable");};
-  constructor(private storage:Storage,private dataDir:string,private send:Send,private shellControlPlanePorts:readonly number[]=[]){ }
+  readonly diagnostics:Diagnostics;
+  constructor(private storage:Storage,private dataDir:string,private send:Send,private shellControlPlanePorts:readonly number[]=[]){this.diagnostics=new Diagnostics(dataDir);}
+  private diagnose(event:DiagnosticEvent,row:RecordRow,fields:DiagnosticFields={}){const live=this.active.get(row.id);if(live?.stopReason&&["delegation_error","review_error","prompt_error","agent_end"].includes(event))fields={...fields,reason:live.stopReason};this.diagnostics.write(event,{sessionId:row.id,rootId:row.rootId||row.id,parentId:row.parentId,role:row.role,runId:live?.metadata?.runId??undefined,...fields});}
+  private clearDeadline(id:string){const live=this.active.get(id);if(live){clearTimeout(live.deadline);live.deadline=undefined;}}
+  private markStopped(row:RecordRow,reason:FailureReason){
+    this.clearDeadline(row.id);const live=this.active.get(row.id);if(live)live.stopReason??=reason;
+    this.diagnose("agent_stop",row,{reason:live?.stopReason??reason,...(reason==="timeout"?{timeoutMs:AGENT_TIMEOUT_MS}:{})});
+  }
+  private armDeadline(row:RecordRow){
+    const live=this.active.get(row.id);if(!live)return;
+    this.clearDeadline(row.id);live.startedAt=Date.now();live.stopReason=undefined;
+    this.diagnose("agent_start",row,{timeoutMs:AGENT_TIMEOUT_MS});
+    live.deadline=setTimeout(()=>{
+      this.diagnose("agent_timeout",row,{reason:"timeout",timeoutMs:AGENT_TIMEOUT_MS,durationMs:Date.now()-live.startedAt!});
+      const release=this.stopping.has(row.id)?()=>{}:this.stopFence(row.id);
+      this.track(this.abortTree(row.id,"timeout").finally(release),row);
+    },AGENT_TIMEOUT_MS);
+    live.deadline.unref();
+  }
   /** Enables QA tool registration for role "qa" sessions that start while a user-approved run is active. */
   attachQa(qa:Qa){this.qa=qa;}
   attachBrowserUse(browserUse:BrowserUse){this.browserUse=browserUse;}
-  private track(work:Promise<unknown>){this.background.add(work);void work.then(()=>{this.background.delete(work);},()=>{this.background.delete(work);this.backgroundFailure=true;});}
-  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"browser-use"),join(this.dataDir,"agent"),getAgentDir(),chromeUserDataDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.trimTimer=setInterval(()=>this.trimLoaded(),60_000);this.trimTimer.unref();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
+  private track(work:Promise<unknown>,row?:RecordRow){this.background.add(work);void work.then(()=>{this.background.delete(work);},error=>{this.background.delete(work);this.backgroundFailure=true;const fields={reason:failureReason(error)};if(row)this.diagnose("background_error",row,fields);else this.diagnostics.write("background_error",fields);});}
+  async init(){await chmod(this.dataDir,0o700);sweepCrashTemps(this.dataDir);this.protectPath=credentialGuard([join(this.dataDir,"logs"),join(this.dataDir,"sigma.lock"),join(this.dataDir,"git-intents"),join(this.dataDir,"cliproxyapi"),join(this.dataDir,"antigravity-profile"),join(this.dataDir,"browser-use"),join(this.dataDir,"agent"),getAgentDir(),chromeUserDataDir()]);await mkdir(join(this.dataDir,"sessions"),{recursive:true,mode:0o700});await mkdir(join(this.dataDir,"agent"),{recursive:true,mode:0o700});this.runtime=await ModelRuntime.create();if((process.env.SIGMA_DEMO??process.env.PI_ORCH_DEMO)==="1")registerDemoProvider(this.runtime);await this.loadApprovalMode();this.trimTimer=setInterval(()=>this.trimLoaded(),60_000);this.trimTimer.unref();this.nativeProviders=new NativeCli(this.dataDir);await this.nativeProviders.init();this.nativeIdentity=registerClaudeProvider(this.runtime,this.nativeProviders).identity;this.agy=registerAgyUnsupervisedProvider(this.runtime,this.nativeProviders);await this.runtime.refresh({allowNetwork:false});this.cliproxyProviders=new CliproxyProvider(this.runtime,this.dataDir);this.cliproxyProviders.init();this.providerAuth=new ProviderAuth(this.runtime);}
   private async availableModels(){
     // SDK auth checks can throw errors containing credentials, even for an
     // unrelated provider with no models. Every availability consumer is fenced.
@@ -422,6 +442,7 @@ export class PiHost {
     const browserToolsEnabled=!!this.browserUse&&row.id===context.root.id&&row.role==="root"&&!row.parentId&&!unsupervised&&profile.tools.length>0;
     const task=row.policy?.requested.mode==="multi"&&row.policy.task?await this.storage.call<ProjectTaskView|undefined>("projectTask",{id:row.policy.task.id}):undefined;
     const settings=SettingsManager.inMemory();
+    settings.setHttpIdleTimeoutMs(AGENT_TIMEOUT_MS);
     const loader=new DefaultResourceLoader({cwd:row.cwd,agentDir:join(this.dataDir,"agent"),settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,appendSystemPrompt:canDelegate&&!row.parentId?[ORCHESTRATOR_PROMPT]:[],extensionFactories:[{
       name:"approval-gate",factory:(pi)=>{
       for(const tool of inspectionTools(row.cwd,this.protectPath,(tool,preview)=>this.requestApproval(row,tool,preview),()=>this.isStopping(row)))pi.registerTool(tool);
@@ -514,6 +535,7 @@ export class PiHost {
         if(!native)return;
         const metadata:RunMetadata={runId:randomUUID(),model:native.model?`${native.model.provider}/${native.model.id}`:row.model,reasoning:native.model?.reasoning?native.thinkingLevel:null,reasoningAvailability:native.model?native.model.reasoning?"available":"unsupported":"unavailable",title:native.sessionName??visibleMessages(native,row.cwd).find(message=>message.role==="user")?.text.slice(0,120)??null};
         const live=this.active.get(row.id);if(live)live.metadata=metadata;
+        this.armDeadline(row);
         await this.storage.call("graphMetadata",{id:row.id,metadata});
       });
       // SDK turn_end supplies IDs only after SessionManager appended the messages.
@@ -583,12 +605,24 @@ export class PiHost {
       else if(event.type==="message_update"&&event.assistantMessageEvent.type==="thinking_start")this.track(this.send(channel,"thinking",{agentId:row.id,status:"active"}));
       else if(event.type==="message_update"&&event.assistantMessageEvent.type==="thinking_delta")this.queueThinking(channel,row.id,event.assistantMessageEvent.delta);
       else if(event.type==="message_update"&&event.assistantMessageEvent.type==="thinking_end"){this.flushThinking(channel,row.id);const text=event.assistantMessageEvent.content?.trim().slice(0,8000);this.track(this.send(channel,"thinking",{agentId:row.id,status:"done",...(text?{text}:{})}));}
-      else if(event.type==="message_end"){if(!row.parentId)this.flushDelta(channel);this.track(this.send(channel,row.parentId?"agent_history_changed":"history_changed",row.parentId?{id:row.id}:{},true));}
+      else if(event.type==="message_end"){
+        if(event.message.role==="assistant"&&event.message.stopReason==="error"){const reason=failureReason(event.message.errorMessage);this.diagnose("provider_error",row,{reason:reason==="internal_error"?"provider_error":reason});}
+        if(!row.parentId)this.flushDelta(channel);this.track(this.send(channel,row.parentId?"agent_history_changed":"history_changed",row.parentId?{id:row.id}:{},true),row);
+      }
       else if(event.type==="tool_execution_start"){const detail=toolDetail(row.cwd,event.toolName,event.args);details.set(event.toolCallId,detail);this.track(this.send(channel,"tool",{agentId:row.id,tool:event.toolName,status:"requested",...(detail?{detail}:{})},true));}
-      else if(event.type==="tool_execution_end"){const exit=event.toolName==="bash"?this.bashExits.get(event.toolCallId):undefined;this.bashExits.delete(event.toolCallId);const detail=exit===undefined?details.get(event.toolCallId):`${details.get(event.toolCallId)??""} → ${exit}`.trim();details.delete(event.toolCallId);this.track(this.send(channel,"tool",{agentId:row.id,tool:event.toolName,status:event.isError?"error":"done",...(detail?{detail}:{})},true));}
-      else if(event.type==="agent_settled"&&row.status==="running"){
+      else if(event.type==="tool_execution_end"){
+        const exit=event.toolName==="bash"?this.bashExits.get(event.toolCallId):undefined;
+        if(event.isError){const code=exit?.match(/^exit (\d+)$/)?.[1];this.diagnose("tool_error",row,{tool:event.toolName,reason:failureReason(exit),...(code?{exitCode:Number(code)}:{})});}
+        this.bashExits.delete(event.toolCallId);const detail=exit===undefined?details.get(event.toolCallId):`${details.get(event.toolCallId)??""} → ${exit}`.trim();details.delete(event.toolCallId);
+        this.track(this.send(channel,"tool",{agentId:row.id,tool:event.toolName,status:event.isError?"error":"done",...(detail?{detail}:{})},true),row);
+      }
+      else if(event.type==="agent_settled"){
+        this.clearDeadline(row.id);
+        const startedAt=this.active.get(row.id)?.startedAt;
         const last=[...session.messages].reverse().find(m=>m.role==="assistant");
         const status=last?.role==="assistant"&&last.stopReason==="error"?"error":last?.role==="assistant"&&last.stopReason==="aborted"?"interrupted":"settled";
+        this.diagnose("agent_end",row,{status:row.status==="running"?status:row.status,...(startedAt?{durationMs:Date.now()-startedAt}:{})});
+        if(row.status!=="running")return;
         this.track(this.setStatus(row,status));
         // Only AGY's clipped, control-stripped result error and Claude Code's clipped CLI error (e.g. usage credits required) are surfaced; other native errors stay generic.
         if(status==="error"&&last?.role==="assistant"&&typeof last.errorMessage==="string"&&(last.provider===AGY_UNSUPERVISED_PROVIDER_ID&&last.errorMessage.startsWith("Antigravity unsupervised request failed")||last.provider===CLAUDE_PROVIDER_ID&&last.errorMessage.startsWith("Claude Code: ")))this.track(this.send(row.rootId||row.id,"error",{message:last.errorMessage},true));
@@ -846,7 +880,7 @@ export class PiHost {
     const root=await this.verifiedCode(rootId);
     const selected=root.policy?.role?await this.roleSelection("reviewer",root.model,root.policy.role.catalog):undefined;
     const check=()=>{admission.check();if(signal.aborted||this.isStopping(root))throw new Error("Review stopped before creation");};check();
-    const timeout=AbortSignal.timeout(READ_ONLY_PROFILE.childTimeoutMs),combined=AbortSignal.any([signal,timeout]);
+    const timeout=AbortSignal.timeout(AGENT_TIMEOUT_MS),combined=AbortSignal.any([signal,timeout]);
     if(combined.aborted)throw new Error("Review stopped before creation");
     this.runningChildren++;
     let handedOff=false,row:RecordRow|undefined;
@@ -871,7 +905,7 @@ export class PiHost {
     await this.setStatus(row,"running");check();
     if(combined.aborted){await this.abortReviewer(rootId,reviewId);throw new Error("Review stopped before prompt");}
     const session=reviewer.session;
-    const onAbort=()=>{void this.abortReviewer(rootId,reviewId).catch(()=>{});};
+    const onAbort=()=>{this.track(this.abortReviewer(rootId,reviewId,timeout.aborted?"timeout":"cancelled"),row);};
     combined.addEventListener("abort",onAbort,{once:true});
     if(combined.aborted)onAbort();
     await this.storage.call("commandSetupPhase",{id:commandId,from:"opened",to:"dispatching"});
@@ -884,15 +918,16 @@ export class PiHost {
       if(last?.role==="assistant"&&last.stopReason==="error")throw new Error("Reviewer provider failed");
       if(last?.role==="assistant"&&last.stopReason==="aborted")throw new Error("Reviewer was interrupted");
       return session.getLastAssistantText()||"Reviewer returned no findings text";
-    }).catch(async error=>{await this.storage.call("commandStatus",{id:commandId,status:"unknown"});throw error;}).finally(()=>{combined.removeEventListener("abort",onAbort);this.runningChildren--;});
+    }).catch(async error=>{this.diagnose("review_error",row!,{reason:timeout.aborted?"timeout":failureReason(error)});await this.storage.call("commandStatus",{id:commandId,status:"unknown"});throw error;}).finally(()=>{combined.removeEventListener("abort",onAbort);this.runningChildren--;});
     handedOff=true;
     return {done};
-    }catch(error){const setupState=await this.storage.call<any>("commandSetupGet",{id:commandId});if(!setupState?.setup||setupState.setup.phase==="reserved")await this.storage.call("commandTransition",{id:commandId,from:"accepted",to:"rejected"});else await this.storage.call("commandStatus",{id:commandId,status:"unknown"});if(row&&(row.status==="idle"||row.status==="running"))await this.setStatus(row,combined.aborted||this.isStopping(root)?"interrupted":"error");throw error;}
+    }catch(error){this.diagnostics.write("review_error",{sessionId:reviewId,rootId,role:"reviewer",reason:timeout.aborted?"timeout":failureReason(error)});const setupState=await this.storage.call<any>("commandSetupGet",{id:commandId});if(!setupState?.setup||setupState.setup.phase==="reserved")await this.storage.call("commandTransition",{id:commandId,from:"accepted",to:"rejected"});else await this.storage.call("commandStatus",{id:commandId,status:"unknown"});if(row&&(row.status==="idle"||row.status==="running"))await this.setStatus(row,combined.aborted||this.isStopping(root)?"interrupted":"error");throw error;}
     finally{if(!handedOff)this.runningChildren--;}
   }
-  async abortReviewer(rootId:string,reviewId:string){
+  async abortReviewer(rootId:string,reviewId:string,reason:FailureReason="cancelled"){
     const active=this.active.get(reviewId);if(!active||active.row.parentId!==rootId||active.row.role!=="reviewer")return;
     this.stopping.add(reviewId);
+    this.markStopped(active.row,reason);
     try{await this.denyApprovals(rootId,reviewId);await active.session.abort();await this.setStatus(active.row,"interrupted");}
     finally{this.stopping.delete(reviewId);}
   }
@@ -1004,7 +1039,7 @@ export class PiHost {
       child=await this.open(row,manager);
       await this.storage.call("commandSetupPhase",{id:commandId,from:"registered",to:"opened"});
       check();await this.setStatus(row,"running");check();
-      timer=setTimeout(()=>{timedOut=true;void this.stopChild(run!).catch(()=>{});},profile.childTimeoutMs);
+      timer=setTimeout(()=>{timedOut=true;this.track(this.stopChild(run!,"timeout"),row);},AGENT_TIMEOUT_MS);
       await this.storage.call("commandSetupPhase",{id:commandId,from:"opened",to:"dispatching"});
       if(!await this.storage.call<boolean>("markSessionDispatch",{id:row.id}))throw new Error("Session dispatch ownership is unavailable");
       check();try{await child.session.prompt(`Role: ${role}. Task: ${task}\nReturn a concise result and state what you verified.`);}finally{workDone();}
@@ -1015,7 +1050,7 @@ export class PiHost {
       const answer=child.session.getLastAssistantText()||"No assistant result";
       const where=writer?inPlace?"; its changes were applied in the working copy (it edited the working copy directly)":await this.integrateWorker(parent,row,context.root,run,check):"";
       return `${role} ${row.id} returned (not independently verified)${where}: ${answer}`;
-    }catch(error){if(registered&&row&&(row.status==="idle"||row.status==="running"))await this.setStatus(row,aborted||run?.cancelled||timedOut?"interrupted":"error");throw error;}
+    }catch(error){this.diagnose("delegation_error",row,{reason:timedOut?"timeout":aborted||run?.cancelled?"cancelled":failureReason(error)});if(registered&&row&&(row.status==="idle"||row.status==="running"))await this.setStatus(row,aborted||run?.cancelled||timedOut?"interrupted":"error");throw error;}
     finally{workDone();signal?.removeEventListener("abort",onAbort);if(timer)clearTimeout(timer);try{if(run?.stop)await run.stop;}finally{if(row&&this.children.get(row.id)===run)this.children.delete(row.id);finish();this.runningChildren--;}}
   }
   /** Reports where a finished isolated worker's changes ended up, merging them automatically when Full access is on. Never loses work: on any problem the merge stays for the user. */
@@ -1323,7 +1358,7 @@ export class PiHost {
           if(row.status!=="settled")throw new Error("Child run is unavailable");
           this.runningChildren++;
           childRun={row,cancelled:false,done:new Promise<void>(resolve=>{finish=resolve;})};this.children.set(id,childRun);
-          timer=setTimeout(()=>{void this.stopChild(childRun!).catch(()=>{});},row.policy?.effective.profile.childTimeoutMs??READ_ONLY_PROFILE.childTimeoutMs);
+          timer=setTimeout(()=>{this.track(this.stopChild(childRun!,"timeout"),row);},AGENT_TIMEOUT_MS);
         }
       }else if(row.parentId)throw new Error("Child sessions require the root session child control");
       if(this.isStopping(row))throw new Error("Session is stopping");
@@ -1355,12 +1390,13 @@ export class PiHost {
       if(rootId&&queued&&!observedQueue){admission="unknown";await session.abort();throw new Error("Child run ended during prompt admission; inspect its history before sending a new command");}
       admission="dispatched";
       if(commandId)await this.storage.call("commandStatus",{id:commandId,status:queued?"queued":"dispatched"});
-      this.track(run.then(async()=>{if(commandId&&!queued)await this.storage.call("commandStatus",{id:commandId,status:childRun?.cancelled?"unknown":"completed"});},async()=>{
+      this.track(run.then(async()=>{if(commandId&&!queued)await this.storage.call("commandStatus",{id:commandId,status:childRun?.cancelled?"unknown":"completed"});},async error=>{
+        this.clearDeadline(row.id);this.diagnose("prompt_error",row,{reason:failureReason(error)});
         if(commandId)await this.storage.call("commandStatus",{id:commandId,status:"unknown"});
         if(!this.isStopping(row)&&row.status==="running")await this.setStatus(row,"error");await this.send(row.rootId||id,"error",{message:"Pi run failed; inspect session history before retrying"},true);
       }));
       return queued?"queued":"dispatched";
-    }catch(error){if(!run)releaseChild();if(commandId)await this.storage.call("commandStatus",{id:commandId,status:admission});throw error;}
+    }catch(error){this.diagnostics.write("prompt_error",{sessionId:id,rootId,reason:failureReason(error)});if(!run)releaseChild();if(commandId)await this.storage.call("commandStatus",{id:commandId,status:admission});throw error;}
     finally{unsubscribeQueue();if(admissionLock)this.admittingChildren.delete(id);}
   }
   private async fact(row:RecordRow,fact:Omit<GraphFact,"run">&{run?:RunMetadata|null;receiptEntryId?:string}){
@@ -1386,10 +1422,11 @@ export class PiHost {
     return finalizing;
   }
   private async denyApprovals(rootId:string,agentId?:string){await Promise.all([...this.pending].filter(([,p])=>p.sessionId===rootId&&(!agentId||p.agentId===agentId)).map(([id,p])=>this.finishApproval(id,p,"denied")));}
-  private stopChild(run:ChildRun):Promise<void>{
+  private stopChild(run:ChildRun,reason:FailureReason="cancelled"):Promise<void>{
     if(run.stop)return run.stop;
     if(run.row.status!=="idle"&&run.row.status!=="running")return Promise.resolve();
     run.cancelled=true;
+    this.markStopped(run.row,reason);
     run.stop=(async()=>{if(run.registered!==false)await this.setStatus(run.row,"interrupted");await this.denyApprovals(run.row.rootId||run.row.id,run.row.id);await this.active.get(run.row.id)?.session.abort();})();
     return run.stop;
   }
@@ -1398,7 +1435,7 @@ export class PiHost {
     if(this.stopping.has(id))throw new Error("Session stop is already in progress");
     this.stopping.add(id);this.browserUse?.revoke(id);for(const admission of this.promptAdmissions)if(admission.id===id||admission.unresolvedOwner)admission.cancelled=true;return ()=>this.stopping.delete(id);
   }
-  private async abortTree(id:string){
+  private async abortTree(id:string,reason:FailureReason="cancelled"){
     const members=await this.storage.call<Array<{id:string}>>("agents",{rootId:id});
     const memberIds=new Set([id,...members.map(member=>member.id)]);
     const admissions=()=>[...this.promptAdmissions].filter(admission=>memberIds.has(admission.id)||admission.unresolvedOwner);
@@ -1409,8 +1446,8 @@ export class PiHost {
     const ids=new Set([id,...runs.map(run=>run.row.id),...agents.map(active=>active.row.id)]);
     await Promise.all([...this.pending].filter(([,p])=>ids.has(p.agentId)).map(([approvalId,p])=>this.finishApproval(approvalId,p,"denied")));
     await Promise.all([
-      ...runs.map(run=>this.stopChild(run)),
-      ...agents.map(async active=>{if(active.row.status==="running"){await this.setStatus(active.row,"interrupted");await active.session.abort();}}),
+      ...runs.map(run=>this.stopChild(run,reason)),
+      ...agents.map(async active=>{if(active.row.status==="running"){this.markStopped(active.row,reason);await this.setStatus(active.row,"interrupted");await active.session.abort();}}),
     ]);
     await Promise.all(runs.map(run=>run.done));
     // Keep the fence until admissions at API/SDK awaits have unwound, including arrivals during Stop.
@@ -1454,7 +1491,7 @@ export class PiHost {
   grantedTools(id:string):string[]{return [...this.grants.get(id)??[]];}
   /** Ask again for every call in this chat. */
   async revokeGrants(id:string){this.grants.delete(id);await this.send(id,"approval_grants",{tools:[]},false);}
-  beginShutdown(){this.closing=true;clearInterval(this.trimTimer);killAllShells();this.providerAuth?.beginShutdown();this.nativeProviders?.beginShutdown();}
+  beginShutdown(){if(!this.closing)this.diagnostics.write("service_shutdown",{reason:"shutdown"});this.closing=true;clearInterval(this.trimTimer);killAllShells();this.providerAuth?.beginShutdown();this.nativeProviders?.beginShutdown();}
   close(){
     this.beginShutdown();
     return this.closeWork??=(async()=>{
@@ -1468,8 +1505,8 @@ export class PiHost {
     const active=[...this.active.values()];
     await approvalDrain;
     await Promise.all([
-      ...runs.map(run=>settle(()=>this.stopChild(run))),
-      ...active.map(({session,row})=>settle(async()=>{await session.abort();if(row.status==="running")await this.setStatus(row,"interrupted");})),
+      ...runs.map(run=>settle(()=>this.stopChild(run,"shutdown"))),
+      ...active.map(({session,row})=>settle(async()=>{this.clearDeadline(row.id);if(row.status==="running")this.markStopped(row,"shutdown");await session.abort();if(row.status==="running")await this.setStatus(row,"interrupted");})),
     ]);
     await Promise.allSettled([...runs.map(run=>run.done),...admissions.map(admission=>admission.done)]);
     while(this.approvalFinalizers.size)await Promise.allSettled([...this.approvalFinalizers]);
@@ -1479,7 +1516,7 @@ export class PiHost {
     while(this.background.size)await Promise.allSettled([...this.background]);
     await Promise.all([authDrain,nativeDrain,proxyDrain]);
     if(this.backgroundFailure)failures.push(new Error("Pi journal update failed before shutdown"));
-    if(failures.length)throw new AggregateError(failures,"Pi host shutdown did not finish cleanly");
+    if(failures.length){this.diagnostics.write("service_error",{reason:"internal_error"});throw new AggregateError(failures,"Pi host shutdown did not finish cleanly");}
     })();
   }
 }

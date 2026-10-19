@@ -1,9 +1,11 @@
 export type RunStatus = "idle" | "running" | "settled" | "interrupted" | "error";
 export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
+/** Shared execution ceiling for every agent role, including restored sessions. */
+export const AGENT_TIMEOUT_MS=30*60*1000;
 export const READ_ONLY_PROFILE = {
   execution: "host", tools: ["read", "ls"], approval: "per-call",
   // rootTotalChildren is not a count limit: 0 means this profile cannot delegate, any positive value means unlimited.
-  rootTotalChildren: 4, maxDepth: 1, childTimeoutMs: 300_000,
+  rootTotalChildren: 4, maxDepth: 1, childTimeoutMs: AGENT_TIMEOUT_MS,
 } as const;
 export const CODE_PROFILE={...READ_ONLY_PROFILE,tools:["read","ls","edit","write"],rootTotalChildren:0,maxDepth:0} as const;
 export const VERIFIED_CODE_PROFILE={...CODE_PROFILE,verification:"node-test"} as const;
@@ -12,7 +14,7 @@ export const REPOSITORY_CODE_PROFILE={...VERIFIED_CODE_PROFILE,sourceApply:true,
 export const DIRECT_PARALLEL_CODE_PROFILE={...DIRECT_CODE_PROFILE,rootTotalChildren:2,maxDepth:1} as const;
 export const PARALLEL_CODE_PROFILE={...REPOSITORY_CODE_PROFILE,rootTotalChildren:2,maxDepth:1} as const;
 export const MULTI_REPO_PROFILE={...READ_ONLY_PROFILE,tools:[],rootTotalChildren:0,maxDepth:0} as const;
-// Existing snapshots keep their original limits. Only newly created roots use these bounds.
+// Existing snapshots keep their tool/depth limits; execution deadlines use AGENT_TIMEOUT_MS at runtime.
 export const NESTED_READ_PROFILE={...READ_ONLY_PROFILE,maxDepth:2} as const;
 export const NESTED_CODE_PROFILE={...DIRECT_CODE_PROFILE,rootTotalChildren:4} as const;
 export const NESTED_REPOSITORY_PROFILE={...REPOSITORY_CODE_PROFILE,rootTotalChildren:4} as const;
