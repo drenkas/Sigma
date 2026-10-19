@@ -33,7 +33,7 @@ export type Artifact = {
 };
 export type GitIntent = {
     id: string;
-    kind: "commit" | "pull" | "switch" | "push";
+    kind: "commit" | "pull" | "switch" | "push" | "stash";
     identity: GitIdentity;
     message?: string;
     files?: Array<{

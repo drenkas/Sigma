@@ -144,7 +144,10 @@ export interface FolderStatus {
 }
 export interface ProjectStatus { id:string; checkedAt:number; folders:FolderStatus[]; }
 export interface SessionGitActions { enabled:boolean; reason?:string; commit:boolean; branches:string[]; }
-export interface SessionRepositoryView { checkedAt:number; source:FolderStatus; workspace:FolderStatus|null; git:SessionGitActions; }
+export interface GitStashView { ref:string; oid:string; subject:string; at:number; }
+/** `current`: the folder this panel shows; `sigma`: an isolated workspace Sigma created for a session or worker. */
+export interface GitWorktreeView { path:string; head:string|null; branch:string|null; detached:boolean; bare:boolean; locked:boolean; prunable:boolean; current:boolean; sigma:boolean; }
+export interface SessionRepositoryView { checkedAt:number; source:FolderStatus; workspace:FolderStatus|null; git:SessionGitActions; stashes:GitStashView[]; worktrees:GitWorktreeView[]; }
 
 // Graph facts are observed execution records, never inferred from status or prose.
 export interface RunMetadata {runId:string|null;model:string;reasoning:string|null;reasoningAvailability:"available"|"unsupported"|"unavailable";title:string|null;}
