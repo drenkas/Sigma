@@ -54,7 +54,7 @@ test('all current Claude CLI models are registered and each runs with its own id
   await mode('normal');const {owner,runtime}=await setup('lineup');
   try{
     const ids=['claude-fable-5-1','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5-20251001','claude-sonnet-4-6'];
-    assert.deepEqual(runtime.getModels(CLAUDE_PROVIDER_ID).map(entry=>entry.id).sort(),[...ids].sort());
+    assert.deepEqual(runtime.getModels(CLAUDE_PROVIDER_ID).map(entry=>entry.id).sort(),[...ids,'claude-opus-9-9'].sort(),'Fallback lineup plus the CLI-discovered model');
     for(const id of ids){
       const selected=runtime.getModel(CLAUDE_PROVIDER_ID,id)!,haiku=id.includes('haiku');assert.equal(selected.reasoning,!haiku);
       const stream=runtime.streamSimple(selected,{messages:[{role:'user',content:'hello',timestamp:Date.now()}],tools:[tool]},haiku?{}:{reasoning:id==='claude-sonnet-4-6'?'high':'xhigh'});
@@ -151,6 +151,18 @@ test('a saved-enabled route is verified at startup, and a logged-out CLI does no
   await mode('logged-out');const third=new NativeCli(dir);
   try{await third.init();assert.equal(third.list()[0].state,'login_required');assert.equal(third.isConnected(),false);}finally{await third.close();}
   await mode('normal');const fourth=new NativeCli(dir),started=fourth.init();await fourth.close();await started;assert.equal(fourth.isConnected(),false,'close() during init stays safe');
+});
+
+test('the CLI-discovered model catalog is registered, persisted and reloaded',async()=>{
+  await mode('normal');const {owner,runtime,dir}=await setup('catalog');
+  try{
+    const discovered=await waitFor(async()=>runtime.getModels(CLAUDE_PROVIDER_ID).find(entry=>entry.id==='claude-opus-9-9'));
+    assert.equal(discovered.thinkingLevelMap?.xhigh,null);assert.equal(discovered.thinkingLevelMap?.max,'max');
+    assert.ok(runtime.getModels(CLAUDE_PROVIDER_ID).some(entry=>entry.id==='claude-sonnet-4-6'),'Fallback models stay registered');
+    assert.ok(await stat(join(dir,'claude-models.json')));
+  }finally{await owner.close();}
+  await mode('logged-out');const reloaded=new NativeCli(dir);
+  try{await reloaded.init();assert.ok(reloaded.getClaudeCatalog().some(entry=>entry.id==='claude-opus-9-9'),'Persisted catalog loads without a fresh discovery');}finally{await reloaded.close();}
 });
 
 test('a Claude Code CLI error reaches the chat as an error event',async()=>{

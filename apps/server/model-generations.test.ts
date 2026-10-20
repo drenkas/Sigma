@@ -16,6 +16,10 @@ test("families are separated per provider",()=>{
 test("claude-sonnet and claude-opus are separate families",()=>{
   assert.deepEqual([...previousGeneration(m("p",["claude-sonnet-4","claude-sonnet-5-5-high","claude-opus-4"]))],["p/claude-sonnet-4"]);
 });
+test("Claude hides older minor versions without treating release dates as versions",()=>{
+  const all=m("sigma-claude-cli",["claude-opus-5","claude-opus-5-5","claude-fable-5","claude-fable-5-1","claude-sonnet-5","claude-sonnet-5-5","claude-haiku-4-5-20251001","claude-haiku-4-6","claude-opus-5-10","claude-opus-5.10"]);
+  assert.deepEqual([...previousGeneration(all)], ["claude-opus-5","claude-opus-5-5","claude-fable-5","claude-sonnet-5","claude-haiku-4-5-20251001"].map(id=>`sigma-claude-cli/${id}`));
+});
 test("a future generation hides the previous one",()=>{
   assert.ok(previousGeneration([...codex,...m("openai-codex",["gpt-7-sol"])]).has("openai-codex/gpt-6.1-sol"));
 });

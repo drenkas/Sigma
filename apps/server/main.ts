@@ -1,7 +1,9 @@
 import { Cleanup } from "./cleanup.js";
+import { Diagnostics, failureReason, observeFatalErrors } from "./diagnostics.js";
 import Fastify from "fastify";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiHost } from "./pi-host.js";
@@ -12,7 +14,8 @@ import { InternalChrome } from "./internal-chrome.js";
 import { SourceApply } from "./source-apply.js";
 import { WorkerMerge } from "./worker-merge.js";
 import { Storage } from "./storage.js";
-import type { JournalEvent, RoleReasoning, ProjectTaskView, ProjectView } from "../../packages/contracts/index.js";
+import type { FolderStatus, GitStashView, GitWorktreeView, JournalEvent, RoleReasoning, ProjectTaskView, ProjectView } from "../../packages/contracts/index.js";
+import { gitStashes, gitWorktrees } from "./git-actions.js";
 import { folderStatus, projectInput, projectStatus } from "./projects.js";
 import { projectAgentsInput } from "./roles.js";
 import { snapshotProjectTask } from "./project-task.js";
@@ -31,6 +34,9 @@ const setting=(name:string)=>process.env[`SIGMA_${name}`]??process.env[`PI_ORCH_
 const lease=await DataLease.acquire(setting("DATA_DIR")?resolve(setting("DATA_DIR")!):join(root,".data"));
 await startupMigration(lease,setting("MIGRATE_PUBLISH"),process.env.SIGMA_MIGRATION_STAGE?resolve(process.env.SIGMA_MIGRATION_STAGE):defaultStageRoot(lease.directory));
 const dataDir=lease.directory;
+const diagnostics=new Diagnostics(dataDir);
+observeFatalErrors(diagnostics);
+diagnostics.write("service_start");
 const defaultWorkspace=setting("DEFAULT_WORKSPACE")??process.cwd();
 let parentGone=false,serviceListening=false,appClosing=false,shutdown:(()=>Promise<void>)|undefined;
 if(setting("PARENT_WATCH")==="1"){
@@ -43,6 +49,8 @@ if(setting("PARENT_WATCH")==="1"){
 }
 const storage=new Storage(join(dataDir,"state.sqlite"));
 const app=Fastify({logger:false,bodyLimit:100_000});
+app.addHook("onError",async(_req,reply,error)=>{diagnostics.write("http_error",{statusCode:error.statusCode&&error.statusCode>=400?error.statusCode:500,reason:failureReason(error)});});
+app.addHook("onResponse",async(_req,reply)=>{if(reply.statusCode>=500)diagnostics.write("http_error",{statusCode:reply.statusCode,reason:"internal_error"});});
 const port=Number(setting("PORT")||4318);
 if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid local port");
 const devUiPort=4317;
@@ -292,16 +300,23 @@ app.get<{Params:{id:string};Querystring:{after?:string}}>("/api/sessions/:id/gra
 app.get<{Params:{id:string;nodeId:string}}>("/api/sessions/:id/graph/nodes/:nodeId/history",async(req,reply)=>{
   try{await storage.call("graphMember",{scopeId:req.params.id,nodeId:req.params.nodeId});return await host.snapshot(req.params.nodeId);}catch{return reply.code(404).send({error:"Graph node unavailable"});}
 });
+// Stashes and worktrees of the repository a status belongs to; read-only and empty when it is not a Git repository.
+async function repositoryLists(status:FolderStatus):Promise<{stashes:GitStashView[];worktrees:GitWorktreeView[]}>{
+  if(status.state!=="git"||!status.repository)return {stashes:[],worktrees:[]};
+  const workspaces=await realpath(dataDir).catch(()=>dataDir);
+  const [stashes,worktrees]=await Promise.all([gitStashes(status.repository).catch(()=>[]),gitWorktrees(status.repository).catch(()=>[])]);
+  return {stashes,worktrees:worktrees.map(item=>({...item,current:item.path===status.repository,sigma:item.path.startsWith(`${workspaces}/`)}))};
+}
 // Read-only Git status of the session's selected folder and, when separate, its isolated workspace.
 app.get<{Params:{id:string}}>("/api/sessions/:id/repository",async(req,reply)=>{
   let snapshot;try{snapshot=await host.state(req.params.id);}catch{return reply.code(404).send({error:"Session unavailable"});}
   const source=snapshot.policy?.workspace?.sourceCwd??snapshot.cwd;
   const [sourceStatus,workspaceStatus,git]=await Promise.all([folderStatus(source),snapshot.cwd!==source?folderStatus(snapshot.cwd):Promise.resolve(null),host.gitInfo(req.params.id)]);
-  return {checkedAt:Date.now(),source:sourceStatus,workspace:workspaceStatus,git};
+  return {checkedAt:Date.now(),source:sourceStatus,workspace:workspaceStatus,git,...await repositoryLists(sourceStatus)};
 });
 app.post<{Params:{id:string;action:string};Body:{branch?:unknown}}>("/api/sessions/:id/git/:action",async(req,reply)=>{
   const action=req.params.action;
-  if(action!=="switch"&&action!=="pull"&&action!=="push")return reply.code(404).send({error:"Unknown Git action"});
+  if(action!=="switch"&&action!=="pull"&&action!=="push"&&action!=="stash")return reply.code(404).send({error:"Unknown Git action"});
   try{return await host.gitAction(req.params.id,action,req.body??{},typeof req.headers["x-command-id"]==="string"?req.headers["x-command-id"]:undefined);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git action failed"});}
 });
 app.get<{Params:{id:string}}>("/api/sessions/:id/git-recovery",async(req,reply)=>{try{return await host.gitRecovery(req.params.id);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git recovery unavailable"});}});
@@ -310,11 +325,11 @@ app.post<{Params:{id:string};Body:{commandId:string;acknowledge:true;digest:stri
 app.get<{Querystring:{path?:string}}>("/api/folders/repository",async(req,reply)=>{
   const path=req.query.path??"";if(!path.startsWith("/"))return reply.code(400).send({error:"Folder path required"});
   const [source,git]=await Promise.all([folderStatus(path),host.folderGitInfo(path)]);
-  return {checkedAt:Date.now(),source,workspace:null,git};
+  return {checkedAt:Date.now(),source,workspace:null,git,...await repositoryLists(source)};
 });
 app.post<{Params:{action:string};Body:{path?:unknown;branch?:unknown}}>("/api/folders/git/:action",async(req,reply)=>{
   const action=req.params.action;
-  if(action!=="switch"&&action!=="pull"&&action!=="push")return reply.code(404).send({error:"Unknown Git action"});
+  if(action!=="switch"&&action!=="pull"&&action!=="push"&&action!=="stash")return reply.code(404).send({error:"Unknown Git action"});
   try{return await host.folderGitAction(req.body?.path,action,req.body??{},typeof req.headers["x-command-id"]==="string"?req.headers["x-command-id"]:undefined);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git action failed"});}
 });
 app.get<{Querystring:{path?:string}}>("/api/folders/git-recovery",async(req,reply)=>{try{return await host.folderGitRecovery(req.query.path);}catch(error){return reply.code(409).send({error:error instanceof Error?error.message:"Git recovery unavailable"});}});
@@ -651,7 +666,7 @@ shutdown=()=>shutdownWork??=(async()=>{
   ]);
   await settle(()=>localProxy.close());
   await settle(()=>storage.close());
-  if(failures.length)throw new AggregateError(failures,"Shutdown did not finish cleanly");
+  if(failures.length){diagnostics.write("service_error",{reason:"shutdown"});throw new AggregateError(failures,"Shutdown did not finish cleanly");}
   lease.close();
 })();
 process.once("SIGINT",()=>{if(shutdown)void shutdown().then(()=>process.exit(0),()=>process.exit(1));});
@@ -674,6 +689,6 @@ else try{
       if(!appClosing&&!host.cliproxyProviders.view().connected)throw new Error("Local catalog is unavailable.");
     }finally{clearTimeout(timeout);}
   }}
-  catch{if(!appClosing)console.warn("Local CLIProxyAPI is unavailable. Check its private deployment and provider status.");}
+  catch(error){if(!appClosing){diagnostics.write("service_error",{reason:failureReason(error)});console.warn("Local CLIProxyAPI is unavailable. Check its private deployment and provider status.");}}
   if(!appClosing){await app.listen({host:"127.0.0.1",port});serviceListening=true;console.log(`Sigma API listening on http://127.0.0.1:${port}`);}
-}catch{await shutdown();throw new Error("Sigma could not start its local service.");}
+}catch(error){diagnostics.write("service_error",{reason:failureReason(error)});await shutdown();throw new Error("Sigma could not start its local service.");}

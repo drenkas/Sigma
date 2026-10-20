@@ -319,7 +319,7 @@ test("authenticated Pi SDK session, approval, idempotency and restart",async()=>
     const targetedId=crypto.randomUUID();await req("/sessions","POST",{cwd:`${root}/.`,model},targetedId);
     const policy=(await req(`/sessions/${targetedId}`)).data.policy;
     const {role,setup,...basePolicy}=policy;assert.equal(setup.sessionId,targetedId);assert.equal(setup.managerId,targetedId);assert.equal(setup.policyVersion,basePolicy.version);assert.deepEqual(setup.requested,basePolicy.requested);assert.deepEqual(setup.profile,basePolicy.effective.profile);assert.equal(role.type,"root");assert.equal(role.catalog.revision,1);
-    assert.deepEqual(basePolicy,{version:2,requested:{cwd:`${root}/.`,model,mode:"read"},effective:{cwd:root,model,profile:{execution:"host",tools:["read","ls"],approval:"per-call",rootTotalChildren:4,maxDepth:2,childTimeoutMs:300_000}}});
+    assert.deepEqual(basePolicy,{version:2,requested:{cwd:`${root}/.`,model,mode:"read"},effective:{cwd:root,model,profile:{execution:"host",tools:["read","ls"],approval:"per-call",rootTotalChildren:4,maxDepth:2,childTimeoutMs:1_800_000}}});
     await req(`/sessions/${targetedId}/prompt`,"POST",{text:"delegate2: read:package.json | read:README.md"},crypto.randomUUID());
     await waitFor(async()=>(await req(`/sessions/${targetedId}`)).data.approvals.filter((a:any)=>a.status==="pending").length===2);
     const overlapping=(await req(`/sessions/${targetedId}`)).data;

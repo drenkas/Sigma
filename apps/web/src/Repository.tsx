@@ -1,7 +1,11 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
-import type { FolderStatus, SessionRepositoryView } from "../../../packages/contracts/index.js";
+import type { FolderStatus, GitStashView, SessionRepositoryView } from "../../../packages/contracts/index.js";
 import { api } from "./api.js";
 
+const STASH_DONE:Record<string,string>={save:"Changes stashed.",apply:"Stash applied; it stays in the list.",pop:"Stash applied and removed.",drop:"Stash dropped."};
+// Git writes stash subjects as "On <branch>: <message>" (or "WIP on <branch>: <commit>" without a message).
+const label=(subject:string)=>{const match=/^(?:WIP on|On) ([^:]+): (.*)$/.exec(subject);return match?{branch:match[1],text:match[2]}:{branch:"",text:subject};};
+const when=(at:number)=>new Date(at).toLocaleString(undefined,{dateStyle:"short",timeStyle:"short"});
 const name=(path:string)=>path.split("/").filter(Boolean).pop()||path;
 const changed=(f:FolderStatus)=>(f.staged??0)+(f.unstaged??0);
 const dirty=(f:FolderStatus)=>!!(changed(f)||f.untracked||f.conflicts);
@@ -15,7 +19,7 @@ function summary(f:FolderStatus){
 export function Repository(p:{id:string;folder?:string;revision:string;kind:"direct"|"worktree"|"clone"|null;running:boolean;offline:boolean;onCommit:()=>void;active:boolean}){
   const [value,setValue]=createSignal<SessionRepositoryView|null>(null),[error,setError]=createSignal(""),[loading,setLoading]=createSignal(false);
   const [recoveries,setRecoveries]=createSignal<Array<{id:string;kind:string;head:string|null;tree:string|null;expectedHead:string|null;expectedTree:string|null;state:string;reason?:string;digest:string;canReconcile:boolean}>>([]);
-  const [busy,setBusy]=createSignal<string|null>(null),[result,setResult]=createSignal("");
+  const [busy,setBusy]=createSignal<string|null>(null),[result,setResult]=createSignal(""),[stashMessage,setStashMessage]=createSignal("");
   let generation=0;
   const query=()=>`?path=${encodeURIComponent(p.folder!)}`;
   const route=(path:string)=>p.folder!==undefined?`/folders/${path}${path==="repository"||path==="git-recovery"?query():""}`:`/sessions/${p.id}/${path}`;
@@ -28,9 +32,9 @@ export function Repository(p:{id:string;folder?:string;revision:string;kind:"dir
     finally{if(version===generation)setLoading(false);}
   }
   let seen=p.id;createEffect(()=>{const id=p.id;p.revision;if(p.active){seen=id;setResult("");void refresh();}else{generation++;setLoading(false);if(id!==seen){seen=id;setValue(null);setRecoveries([]);setError("");setResult("");}}});onCleanup(()=>{generation++;});
-  async function act(action:"switch"|"pull"|"push",body:object={}){
-    setBusy(action);setError("");setResult("");
-    try{const data=await api<{output:string}>(route(`git/${action}`),"POST",scoped(body),crypto.randomUUID());setResult(action==="switch"?"Branch switched.":data.output?data.output.split("\n").slice(-2).join(" "):action==="pull"?"Already up to date.":"Pushed.");}
+  async function act(action:"switch"|"pull"|"push"|"stash",body:{op?:string}&Record<string,unknown>={},key:string=action){
+    setBusy(key);setError("");setResult("");
+    try{const data=await api<{output:string}>(route(`git/${action}`),"POST",scoped(body),crypto.randomUUID());setResult(action==="switch"?"Branch switched.":action==="stash"?STASH_DONE[body.op!]:data.output?data.output.split("\n").slice(-2).join(" "):action==="pull"?"Already up to date.":"Pushed.");if(action==="stash"&&body.op==="save")setStashMessage("");}
     catch(e){setError(e instanceof Error?e.message:"Git action failed");}
     finally{setBusy(null);void refresh();}
   }
@@ -44,11 +48,15 @@ export function Repository(p:{id:string;folder?:string;revision:string;kind:"dir
     if(!confirm(`Switch ${name(source()!.path)} to branch “${branch}”? Uncommitted changes are carried over when Git allows it.`)){select.value=current;return;}
     void act("switch",{branch});
   }
+  function stash(op:"apply"|"pop"|"drop",item:GitStashView){
+    if(op==="drop"&&!confirm(`Drop ${item.ref} “${item.subject}”? Its changes are deleted from the stash list.`))return;
+    void act("stash",{op,ref:item.ref,oid:item.oid},`${op}:${item.oid}`);
+  }
   function push(){
     const f=source()!;
     if(confirm(`Push ${f.branch} to ${f.upstream??"origin"}? This publishes your commits to the remote.`))void act("push");
   }
-  return <section class="panel repo-panel" aria-labelledby="h-repository">
+  return <><section class="panel repo-panel" aria-labelledby="h-repository">
     <div class="repo-bar">
       <h3 id="h-repository" class="panel-title truncate">{source()?name(source()!.path):"Repository"}</h3>
       <Show when={source()?.state==="git"}><span class={`badge ${dirty(source()!)?"st-interrupted":"ap-approved"}`}><span class="glyph" aria-hidden="true"/>{summary(source()!)}</span></Show>
@@ -79,10 +87,46 @@ export function Repository(p:{id:string;folder?:string;revision:string;kind:"dir
       </Show>
     </>}</Show>
     <Show when={git()&&!git()!.enabled}><p class="hint">{git()!.reason}</p></Show>
-    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">{p.folder!==undefined?"Commit needs a chat: send a message to start one in this folder; branch, pull and push work here.":"Commit needs a session that edits the selected folder directly; branch, pull and push work here."}</p></Show>
+    <Show when={git()?.enabled&&!git()!.commit}><p class="hint">{p.folder!==undefined?"Commit needs a chat: send a message to start one in this folder; branch, pull, push and stash work here.":"Commit needs a session that edits the selected folder directly; branch, pull, push and stash work here."}</p></Show>
     <For each={value()?.workspace?[value()!.workspace!]:[]}>{w=><p class="hint">{p.kind==="worktree"?"Worktree":"Isolated copy"} · <span class="mono">{w.branch??w.oid?.slice(0,7)??"detached"}</span> · {summary(w)}</p>}</For>
     <For each={recoveries()}>{item=><article class="callout error-callout"><strong>Unknown Git {item.kind}</strong><p>No Git action was replayed. Inspect the observed state before acknowledgement.</p><dl class="setup-identity"><dt>Command</dt><dd class="mono">{item.id}</dd><dt>Observed HEAD</dt><dd class="mono">{item.head??"unavailable"}</dd><dt>Expected HEAD</dt><dd class="mono">{item.expectedHead??"unavailable"}</dd><dt>Observed tree</dt><dd class="mono">{item.tree??"unavailable"}</dd><dt>Expected tree</dt><dd class="mono">{item.expectedTree??"unavailable"}</dd></dl><p>{item.reason??item.state}</p><button class="btn ghost sm" disabled={!!busy()||p.offline} onClick={()=>void refresh()}>Inspect fresh Git state</button><button class="btn accent sm" disabled={!item.canReconcile||!!busy()||p.offline} onClick={()=>void reconcile(item)}>Acknowledge observed state</button></article>}</For>
     <Show when={result()}><p class="hint repo-result" role="status">{result()}</p></Show>
     <Show when={error()}><p class="field-help warn" role="alert">{error()}</p></Show>
-  </section>;
+  </section>
+  <Show when={source()?.state==="git"}>
+    <section class="panel repo-panel" aria-labelledby="h-stashes">
+      <div class="repo-bar"><h3 id="h-stashes" class="panel-title">Stashes</h3><span class="muted small">{value()!.stashes.length||"none"}</span></div>
+      <form class="repo-row" onSubmit={e=>{e.preventDefault();void act("stash",{op:"save",message:stashMessage()},"stash-save");}}>
+        <label class="sr-only" for="stash-message">Stash message</label>
+        <input id="stash-message" class="input sm stash-input" maxLength={200} placeholder="Message (optional)" value={stashMessage()} onInput={e=>setStashMessage(e.currentTarget.value)} disabled={locked()||p.running}/>
+        <button class="btn ghost sm" type="submit" disabled={locked()||p.running||!dirty(source()!)} title="Stashes tracked and untracked changes; ignored files stay">{busy()==="stash-save"?"Stashing…":"Stash changes"}</button>
+      </form>
+      <ul class="repo-items">
+        <For each={value()!.stashes}>{item=><li class="repo-item stack">
+          <div class="repo-item-text"><span class="truncate" title={item.subject}>{label(item.subject).text}</span><span class="mono muted small truncate">{item.ref}{label(item.subject).branch?` · ${label(item.subject).branch}`:""} · {when(item.at)}</span></div>
+          <div class="repo-item-actions">
+            <button class="btn ghost sm" disabled={locked()||p.running} onClick={()=>stash("apply",item)} title="Apply and keep the stash">{busy()===`apply:${item.oid}`?"Applying…":"Apply"}</button>
+            <button class="btn ghost sm" disabled={locked()||p.running} onClick={()=>stash("pop",item)} title="Apply and remove the stash">{busy()===`pop:${item.oid}`?"Popping…":"Pop"}</button>
+            <button class="btn ghost sm" disabled={locked()||p.running} onClick={()=>stash("drop",item)} title="Delete the stash">{busy()===`drop:${item.oid}`?"Dropping…":"Drop"}</button>
+          </div>
+        </li>}</For>
+      </ul>
+    </section>
+    <section class="panel repo-panel" aria-labelledby="h-worktrees">
+      <div class="repo-bar"><h3 id="h-worktrees" class="panel-title">Worktrees</h3><span class="muted small">{value()!.worktrees.length}</span></div>
+      <ul class="repo-items">
+        <For each={value()!.worktrees}>{w=><li class="repo-item">
+          <div class="repo-item-text">
+            <span class="repo-row"><span class="truncate" title={w.path}>{name(w.path)}</span>
+              <Show when={w.current}><span class="tag">this folder</span></Show><Show when={w.sigma}><span class="tag">Sigma workspace</span></Show>
+              <Show when={w.locked}><span class="tag">locked</span></Show><Show when={w.prunable}><span class="tag">prunable</span></Show><Show when={w.bare}><span class="tag">bare</span></Show>
+            </span>
+            <span class="mono muted small truncate" title={w.path}>{w.branch??(w.detached?"detached":"")} · {w.head?.slice(0,7)??"no commits"}</span>
+            <span class="mono muted small repo-path">{w.path}</span>
+          </div>
+        </li>}</For>
+      </ul>
+    </section>
+  </Show>
+  </>;
 }

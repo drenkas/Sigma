@@ -4,16 +4,19 @@ import { join } from 'node:path';
 import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, parseStreamingJson, normalizeContext, validateToolCall, type AssistantMessage, type Model, type Provider, type SimpleStreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { CLAUDE_PROVIDER_ID, NativeCli } from './native-cli.js';
+import { FALLBACK_CLAUDE_MODELS, type ClaudeModelEntry } from './claude-models.js';
 
-// One CLI turn may read whole files and think long. Pi's options.timeoutMs is an HTTP *idle* timeout (default 5 min), so it is applied here as "no CLI output for this long" (default 10 min), with a 30 min ceiling per turn (agy-provider allows more).
-const CLAUDE_IDLE_TIMEOUT_MS=600_000,CLAUDE_MAX_TIMEOUT_MS=1_800_000;
+import { AGENT_TIMEOUT_MS } from '../../packages/contracts/index.js';
+
+// Idle and hard turn deadlines default to the shared 30 minutes; explicit shorter idle requests remain supported.
+const CLAUDE_IDLE_TIMEOUT_MS=AGENT_TIMEOUT_MS,CLAUDE_MAX_TIMEOUT_MS=AGENT_TIMEOUT_MS;
 const minutesOf=(ms:number)=>{const minutes=Math.max(1,Math.round(ms/60000));return `${minutes} minute${minutes===1?'':'s'}`;};
 export function claudeTimeoutMessage(timeoutMs:number){return `Claude CLI did not finish this turn within ${minutesOf(timeoutMs)}. Try again, or split the task into smaller steps.`;}
 export function claudeIdleMessage(idleMs:number){return `Claude CLI sent nothing for ${minutesOf(idleMs)}. Try again, or split the task into smaller steps.`;}
-const API='sigma-claude-cli',BASE_LEVELS=['low','medium','high','max'],FULL_LEVELS=['low','medium','high','xhigh','max'];
+const API='sigma-claude-cli';
 // Verified against `claude` 2.1.284 initialize/get_settings. Haiku has no effort support: no --effort, applied.effort is null. claude-sonnet-4-6 stays registered for existing sessions (hidden from pickers as a previous generation).
-export const CLAUDE_MODELS:{id:string;name:string;efforts:string[]}[]=[{id:'claude-fable-5-1',name:'Claude Fable 5.1 · official CLI',efforts:FULL_LEVELS},{id:'claude-opus-5-5',name:'Claude Opus 5.5 · official CLI',efforts:FULL_LEVELS},{id:'claude-sonnet-5-5',name:'Claude Sonnet 5.5 · official CLI',efforts:FULL_LEVELS},{id:'claude-haiku-4-5-20251001',name:'Claude Haiku 4.5 · official CLI',efforts:[]},{id:'claude-sonnet-4-6',name:'Claude Sonnet 4.6 · official CLI',efforts:BASE_LEVELS}];
-const MODEL_IDS=new Set(CLAUDE_MODELS.map(entry=>entry.id));
+// The live list comes from the CLI initialize response (see NativeCli.discoverModels); this is the offline fallback.
+export const CLAUDE_MODELS=FALLBACK_CLAUDE_MODELS;
 const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
 const object=(value:any)=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const uuid=(value:any)=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
@@ -22,7 +25,8 @@ function requireGuard(value:unknown){if(!value)throw new Error('Native CLI safet
 function exactKeys(value:any,keys:string[]){return object(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));}
 
 export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
-  const models:Model<typeof API>[]=CLAUDE_MODELS.map(entry=>({provider:CLAUDE_PROVIDER_ID,api:API,id:entry.id,name:entry.name,baseUrl:'',reasoning:entry.efforts.length>0,...(entry.efforts.length?{thinkingLevelMap:{off:null,minimal:null,low:'low',medium:'medium',high:'high',xhigh:entry.efforts.includes('xhigh')?'xhigh':null,max:'max'}}:{}),input:['text','image'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}));
+  const toModel=(entry:ClaudeModelEntry):Model<typeof API>=>({provider:CLAUDE_PROVIDER_ID,api:API,id:entry.id,name:entry.name,baseUrl:'',reasoning:entry.efforts.length>0,...(entry.efforts.length?{thinkingLevelMap:{off:null,minimal:null,low:entry.efforts.includes('low')?'low':null,medium:entry.efforts.includes('medium')?'medium':null,high:entry.efforts.includes('high')?'high':null,xhigh:entry.efforts.includes('xhigh')?'xhigh':null,max:entry.efforts.includes('max')?'max':null}}:{}),input:['text','image'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}});
+  let catalog=owner.getClaudeCatalog(),MODEL_IDS=new Set(catalog.map(entry=>entry.id)),models=catalog.map(toModel);
   function identity(selected?:Model<any>){const valid=runtime.getProvider(CLAUDE_PROVIDER_ID)===runtime.getRegisteredNativeProvider(CLAUDE_PROVIDER_ID)&&runtime.getRegisteredNativeProvider(CLAUDE_PROVIDER_ID)===provider&&(!selected||selected.provider===CLAUDE_PROVIDER_ID&&selected.api===API&&MODEL_IDS.has(selected.id));owner.setCollision(!valid);return valid;}
   function stream(selected:Model<any>,context:TranscriptContext,options?:SimpleStreamOptions){
     const events=createAssistantMessageEventStream(),output:AssistantMessage={role:'assistant',content:[],provider:selected.provider,model:selected.id,api:selected.api,usage:structuredClone(usage),stopReason:'pending',timestamp:Date.now()};
@@ -31,7 +35,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
       let terminal:any,init=false,nativeSessionId:string|undefined,structuredIndex:number|undefined,partialJson='',emitted='',pending:{id:string;subtype:string}|undefined,stage=0,broken=false,nativeError='',failure='transport',idleMs=0,idle=false,idleTimer:NodeJS.Timeout|undefined,startedAt=0;const structuredIds=new Set<string>(),strayIds=new Set<string>(),strayIndexes=new Set<number>();
       const tools=getCurrentTools(context.messages),piTools=new Set(tools.map(tool=>tool.name)),schema={type:'object',additionalProperties:false,required:['text','toolCalls'],properties:{text:{type:'string'},toolCalls:{type:'array',maxItems:32,...(tools.length?{items:{oneOf:tools.map(tool=>({type:'object',additionalProperties:false,required:['name','arguments'],properties:{name:{const:tool.name},arguments:tool.parameters}}))}}:{maxItems:0,items:false})}}};
       function text(value:unknown){if(typeof value!=='string')return;let stable=value;if(/[\uD800-\uDBFF]$/.test(stable))stable=stable.slice(0,-1);if(!stable.startsWith(emitted))return;const delta=stable.slice(emitted.length);if(!delta)return;if(!output.content.length){output.content.push({type:'text',text:''});events.push({type:'text_start',contentIndex:0,partial:output});}emitted=stable;(output.content[0] as {text:string}).text=emitted;events.push({type:'text_delta',contentIndex:0,delta,partial:output});}
-      const MODEL=selected.id,levels=CLAUDE_MODELS.find(entry=>entry.id===MODEL)?.efforts??[],effort=levels.length?options?.reasoning??'medium':undefined;
+      const MODEL=selected.id,levels=catalog.find(entry=>entry.id===MODEL)?.efforts??[],effort=levels.length?options?.reasoning??(levels.includes('medium')?'medium':levels[0]):undefined;
       try{
         failure='provider_configuration';requireGuard(identity(selected)&&owner.isConnected()&&!options?.apiKey&&MODEL_IDS.has(MODEL)&&(effort===undefined||levels.includes(effort)));
         requireGuard(!options?.deferred&&!options?.samplingParams&&!options?.maxTokens&&!options?.temperature&&!options?.thinkingBudgets);
@@ -107,6 +111,7 @@ export function registerClaudeProvider(runtime:ModelRuntime,owner:NativeCli){
   }
   const provider:Provider={id:CLAUDE_PROVIDER_ID,name:'Claude Code · official CLI',auth:{apiKey:{name:'Official CLI account',check:async({credential})=>{if(credential)throw new Error('Native routes do not accept Pi credentials');return identity()&&owner.isConnected()?{type:'api_key',source:'official CLI account'}:undefined;},resolve:async({credential})=>{if(credential)throw new Error('Native routes do not accept Pi credentials');return identity()&&owner.isConnected()?{auth:{},source:'official CLI account'}:undefined;}}},getModels:()=>models,stream:stream as Provider['stream'],streamSimple:stream};
   runtime.registerNativeProvider(provider);
+  owner.setClaudeCatalogHook(next=>{catalog=next;MODEL_IDS=new Set(next.map(entry=>entry.id));models=next.map(toModel);void runtime.refresh({allowNetwork:false,providers:[CLAUDE_PROVIDER_ID]}).catch(()=>{});});
   // Composition can replace a reserved provider after reload. Fence the SDK's
   // central dispatch before it can choose a generic HTTP provider.
   const originalSimple=runtime.streamSimple.bind(runtime),originalStream=runtime.stream.bind(runtime);

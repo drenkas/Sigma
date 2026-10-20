@@ -15,6 +15,12 @@ if(process.argv.includes('auth')){
 }else if(['hang','descendant'].includes(mode)){
   process.on('SIGTERM',()=>{});if(mode==='descendant'){const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:['ignore','ignore','ignore']});record({descendant:child.pid});}
   writeFileSync(join(home,'ready'),String(process.pid));setInterval(()=>{},1000);
+}else if(!process.argv.includes('--model')){
+  // Model discovery: answer initialize with the CLI catalog and exit on stdin EOF.
+  record({discovery:true});
+  const rl=createInterface({input:process.stdin});
+  rl.on('line',line=>{const request=JSON.parse(line);if(request.type==='control_request'&&request.request.subtype==='initialize')send({type:'control_response',response:{subtype:'success',request_id:request.request_id,response:{commands:[],account:{tokenSource:'none',apiProvider:'firstParty'},current_permission_mode:'dontAsk',hooks_applied:true,models:[{value:'default',resolvedModel:'claude-opus-5-5',displayName:'Opus 5.5',supportsEffort:true,supportedEffortLevels:['low','medium','high','xhigh','max']},{value:'claude-opus-9-9',resolvedModel:'claude-opus-9-9',displayName:'Opus 9.9',supportsEffort:true,supportedEffortLevels:['low','medium','high','max']},{value:'haiku',resolvedModel:'claude-haiku-4-5-20251001',displayName:'Haiku 4.5',supportsEffort:null}]},pending_permission_requests:[],pending_user_dialog_requests:[]}});});
+  rl.on('close',()=>process.exit(0));
 }else {
   const args=process.argv,effort=args.includes('--effort')?args[args.indexOf('--effort')+1]:null,model=args[args.indexOf('--model')+1],schema=JSON.parse(args[args.indexOf('--json-schema')+1]);
   record({args,systemMode:statSync(args[args.indexOf('--system-prompt-file')+1]).mode&0o777,schema});let stage=0,outputSent=false;

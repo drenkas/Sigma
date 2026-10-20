@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NativeProviderView } from '../../packages/contracts/index.js';
 import { AGY_AGENT_NAME, agyProfileIsReady, prepareAgyProfile } from './agy-profile.js';
+import { loadClaudeCatalog, mergeWithFallback, parseClaudeCatalog, saveClaudeCatalog, type ClaudeModelEntry } from './claude-models.js';
 
 export const CLAUDE_PROVIDER_ID='sigma-claude-cli';
 export const AGY_PROVIDER_ID='sigma-antigravity-cli';
@@ -62,8 +63,12 @@ export class NativeCli {
   private collision=false;
   private agyUnsupervised=false;
   private agyHook?:(enabled:boolean)=>void;
+  private catalog:ClaudeModelEntry[]=mergeWithFallback(undefined);
+  private catalogHook?:(catalog:ClaudeModelEntry[])=>void;
   constructor(private dataDir:string){}
-  async init(){try{const saved=JSON.parse(await readFile(join(this.dataDir,'native-providers.json'),'utf8'));this.enabled=saved.claude===true;this.view.enabled=this.enabled;this.agyUnsupervised=saved.agyUnsupervised===true&&!offline();}catch{}if(offline()){this.view.state='blocked';this.view.message='Native providers are disabled in offline or demo mode.';}
+  getClaudeCatalog(){return this.catalog;}
+  setClaudeCatalogHook(hook:(catalog:ClaudeModelEntry[])=>void){this.catalogHook=hook;}
+  async init(){if(!offline())try{this.catalog=mergeWithFallback(await loadClaudeCatalog(this.dataDir));}catch{}try{const saved=JSON.parse(await readFile(join(this.dataDir,'native-providers.json'),'utf8'));this.enabled=saved.claude===true;this.view.enabled=this.enabled;this.agyUnsupervised=saved.agyUnsupervised===true&&!offline();}catch{}if(offline()){this.view.state='blocked';this.view.message='Native providers are disabled in offline or demo mode.';}
     // A saved-enabled route is verified once at startup (8 s probe timeout) so it is not left disconnected until the user presses Refresh status.
     else if(this.enabled)try{await this.control(()=>this.probe(CLAUDE_PROVIDER_ID));}catch{}}
   list():NativeProviderView[]{
@@ -103,9 +108,22 @@ export class NativeCli {
       this.view.message=authenticated?'Official CLI account · local route '+(this.enabled?'connected':'disconnected'):'Complete claude auth login in the official CLI, then refresh status.';
       this.view.account=authenticated?'claude.ai':undefined;
       this.view.subscription=authenticated&&['pro','max','team','enterprise'].includes(metadata?.subscriptionType)?metadata.subscriptionType:undefined;
+      // Model discovery is best effort: its failure never changes the verified auth state.
+      if(authenticated&&generation===this.generation&&!this.closing)try{await this.discoverModels(controller.signal,generation);}catch{}
     }catch{if(generation===this.generation){this.view.state='error';this.view.message='Official CLI status could not be verified.';}}
     finally{if(this.controller===controller){this.controller=undefined;this.probeWork=undefined;}}
     return generation;
+  }
+  private async discoverModels(signal:AbortSignal,generation:number){
+    if(offline())return;
+    const id=randomUUID();let parsed:ClaudeModelEntry[]|undefined,size=0;
+    const work=this.run({signal,timeoutMs:15000,prepare:async()=>['-p','--safe-mode','--restricted','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--setting-sources','','--settings','{"disableAllHooks":true,"enabledPlugins":{}}','--disable-slash-commands','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--no-session-persistence','--input-format','stream-json','--output-format','stream-json','--verbose'],
+      onStart:send=>send({type:'control_request',request_id:id,request:{subtype:'initialize',hooks:{},sdkMcpServers:[]}}),
+      onLine:(line,send)=>{size+=line.length;if(size>1_000_000)throw new Error('Catalog limit');if(!line.trim())return;let event:any;try{event=JSON.parse(line);}catch{return;}if(event?.type!=='control_response')return;const response=event.response;if(response?.request_id!==id||response?.subtype!=='success')return;parsed=parseClaudeCatalog(response.response?.models);send.end();}});
+    this.probeWork=work;const result=await work;
+    if(result.exitCode!==0||!parsed||generation!==this.generation||this.closing||offline())return;
+    this.catalog=mergeWithFallback(parsed);this.catalogHook?.(this.catalog);
+    try{await saveClaudeCatalog(this.dataDir,parsed);}catch{/* Persistence is optional; keep the live catalog. */}
   }
   private control<T>(work:()=>Promise<T>):Promise<T>{if(this.closing)return Promise.reject(new Error("Native provider is shutting down"));const pending=Promise.resolve().then(()=>{if(this.closing)throw new Error("Native provider is shutting down");return work();});this.controls.add(pending);void pending.then(()=>this.controls.delete(pending),()=>this.controls.delete(pending));return pending;}
   refresh(id:string){return this.control(async()=>{if(id===AGY_PROVIDER_ID){if(offline())return this.list();const binary=process.env.HOME?join(process.env.HOME,'.local','bin','agy'):undefined;try{if(!binary)throw new Error();accessSync(binary,constants.X_OK);}catch{return this.list();}try{this.agyProfileWork=this.agyProfileWork.catch(()=> '').then(()=>prepareAgyProfile(this.dataDir,this.agyUnsupervised));this.agyHome=await this.agyProfileWork;this.agyProfileReady=true;this.agyProfileError=false;}catch{this.agyHome=undefined;this.agyProfileReady=false;this.agyProfileError=true;}return this.list();}await this.probe(id);return this.list();});}

@@ -210,7 +210,7 @@ test('enabling rewrites the profile settings to the unsupervised variant, disabl
   }finally{await f.close();}
 });
 
-test('Pi HTTP idle timeout cannot cut an AGY turn; it can only raise the 30 minute deadline up to 60',()=>{
-  assert.equal(agyTurnTimeout(undefined),1_800_000);assert.equal(agyTurnTimeout(300_000),1_800_000);assert.equal(agyTurnTimeout(2_400_000),2_400_000);assert.equal(agyTurnTimeout(7_200_000),3_600_000);
+test('Pi HTTP idle settings cannot shorten or extend the shared 30 minute AGY deadline',()=>{
+  assert.equal(agyTurnTimeout(undefined),1_800_000);assert.equal(agyTurnTimeout(300_000),1_800_000);assert.equal(agyTurnTimeout(2_400_000),1_800_000);assert.equal(agyTurnTimeout(7_200_000),1_800_000);
   assert.match(agyTimeoutMessage(1_800_000),/30 minutes/);
 });

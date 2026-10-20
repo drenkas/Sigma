@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, normalizeContext, type AssistantMessage, type Model, type Provider, type SimpleStreamOptions, type TranscriptContext } from '@earendil-works/pi-ai';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
-import type { AgyActivity } from '../../packages/contracts/index.js';
+import { AGENT_TIMEOUT_MS, type AgyActivity } from '../../packages/contracts/index.js';
 import { AGY_UNSUPERVISED_PROVIDER_ID, type NativeCli } from './native-cli.js';
 
 // UNSUPERVISED route: AGY executes its own tools. Nothing here is a Pi approval; Sigma only relays what AGY reports.
@@ -12,9 +12,8 @@ const API='sigma-antigravity-unsupervised',MODEL='antigravity-default',MAX_ACTIV
 // `-p=` (empty, attached): a bare `-p` would swallow the next flag as its prompt; the prompt itself arrives on stdin.
 // No `--agent`: custom agent definitions restrict AGY's tool set (only read tools, cannot create files); the default main agent keeps write_to_file etc. Verified live against agy 1.2.17 on 2026-10-05.
 export const AGY_ARGV=['-p=','--input-format','stream-json','--output-format','stream-json','--sandbox','--dangerously-skip-permissions'];
-// Pi's options.timeoutMs is an HTTP idle timeout (5 min by default) and must not cut a whole AGY agent turn; it can only raise the 30 min deadline, up to 60 min.
-const AGY_TURN_TIMEOUT_MS=1_800_000,AGY_MAX_TIMEOUT_MS=3_600_000;
-export const agyTurnTimeout=(requested?:number)=>Math.min(Math.max(requested??0,AGY_TURN_TIMEOUT_MS),AGY_MAX_TIMEOUT_MS);
+// AGY executes a whole native turn; HTTP idle settings must neither shorten nor extend its execution ceiling.
+export const agyTurnTimeout=(_requested?:number)=>AGENT_TIMEOUT_MS;
 export function agyTimeoutMessage(timeoutMs:number){const minutes=Math.max(1,Math.round(timeoutMs/60000));return `Antigravity did not finish this turn within ${minutes} minute${minutes===1?'':'s'}. Try again, or split the task into smaller steps.`;}
 const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
 const object=(value:any)=>value!==null&&typeof value==='object'&&!Array.isArray(value);
